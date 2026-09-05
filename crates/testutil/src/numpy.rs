@@ -1,4 +1,4 @@
-use std::{path::Path, print};
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Array<T> {
@@ -14,7 +14,7 @@ pub trait Element: Sized + Copy {
 impl Element for f32 {
     const DESCR: &str = "<f4";
     fn from_le_bytes(b: &[u8]) -> Result<Self, std::array::TryFromSliceError> {
-        let bytes: [u8; 4] = b[0..4].try_into()?;
+        let bytes: [u8; 4] = b.try_into()?;
         Ok(f32::from_le_bytes(bytes))
     }
 }
@@ -22,7 +22,7 @@ impl Element for f32 {
 impl Element for u32 {
     const DESCR: &str = "<u4";
     fn from_le_bytes(b: &[u8]) -> Result<Self, std::array::TryFromSliceError> {
-        let bytes: [u8; 4] = b[0..4].try_into()?;
+        let bytes: [u8; 4] = b.try_into()?;
         Ok(u32::from_le_bytes(bytes))
     }
 }
@@ -34,9 +34,15 @@ pub enum NpyError {
     FileTooShort(String),
     BadMagic,
     BadHeader(String),
-    DtypeMismatch { expected: &'static str, found: String },
+    DtypeMismatch {
+        expected: &'static str,
+        found: String,
+    },
     FortranOrder,
-    SizeMismatch { expected: usize, found: usize },
+    SizeMismatch {
+        expected: usize,
+        found: usize,
+    },
 }
 
 /// Parsed contents of the .npy header dict.
@@ -75,7 +81,9 @@ fn parse_header(header: &str) -> Result<Header, NpyError> {
     } else if rest.starts_with("False") {
         false
     } else {
-        return Err(NpyError::BadHeader("fortran_order is not True/False".into()));
+        return Err(NpyError::BadHeader(
+            "fortran_order is not True/False".into(),
+        ));
     };
 
     // shape: (), (1024,), (29, 64)
@@ -96,7 +104,11 @@ fn parse_header(header: &str) -> Result<Header, NpyError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(Header { descr, fortran_order, shape })
+    Ok(Header {
+        descr,
+        fortran_order,
+        shape,
+    })
 }
 
 impl From<std::io::Error> for NpyError {
@@ -121,57 +133,73 @@ pub fn load<T: Element>(path: impl AsRef<Path>) -> Result<Array<T>, NpyError> {
     let fbytes = std::fs::read(path)?;
     let fbuf = fbytes.as_slice();
     // Check magic
-    let (magic, fbuf) = fbuf.split_at_checked(6).ok_or(NpyError::FileTooShort(String::from("magic")))?;
+    let (magic, fbuf) = fbuf
+        .split_at_checked(6)
+        .ok_or(NpyError::FileTooShort(String::from("magic")))?;
     if magic != b"\x93NUMPY" {
         return Err(NpyError::BadMagic);
     }
     // Get the major version
-    let (vrsn_buf, fbuf) = fbuf.split_at_checked(2).ok_or(NpyError::FileTooShort(String::from("version")))?;
+    let (vrsn_buf, fbuf) = fbuf
+        .split_at_checked(2)
+        .ok_or(NpyError::FileTooShort(String::from("version")))?;
     let major_vrsn = vrsn_buf[0];
-    if major_vrsn < 1 || major_vrsn > 3 {
-        return Err(NpyError::BadHeader(format!("major version must be between 1 and 3, got {major_vrsn}")))
+    if !(1..=3).contains(&major_vrsn) {
+        return Err(NpyError::BadHeader(format!(
+            "major version must be between 1 and 3, got {major_vrsn}"
+        )));
     }
     // Get header length
-    let len = if major_vrsn == 1 {2} else {4};
-    let (header_len_buf, fbuf) = fbuf.split_at_checked(len).ok_or(NpyError::FileTooShort(String::from("header len")))?;
+    let len = if major_vrsn == 1 { 2 } else { 4 };
+    let (header_len_buf, fbuf) = fbuf
+        .split_at_checked(len)
+        .ok_or(NpyError::FileTooShort(String::from("header len")))?;
     let header_len: usize = if major_vrsn == 1 {
         u16::from_le_bytes([header_len_buf[0], header_len_buf[1]]).into()
     } else {
-        u32::from_le_bytes([header_len_buf[0], header_len_buf[1], header_len_buf[2], header_len_buf[3]]) as usize
+        u32::from_le_bytes([
+            header_len_buf[0],
+            header_len_buf[1],
+            header_len_buf[2],
+            header_len_buf[3],
+        ]) as usize
     };
     // Get header
-    let (header_buf, fbuf) = fbuf.split_at_checked(header_len).ok_or(NpyError::FileTooShort(String::from("header")))?;
+    let (header_buf, fbuf) = fbuf
+        .split_at_checked(header_len)
+        .ok_or(NpyError::FileTooShort(String::from("header")))?;
     let header_str = str::from_utf8(header_buf)?;
     let header = parse_header(header_str)?;
     // Validate header
     if header.descr != T::DESCR {
-        return Err(NpyError::DtypeMismatch { expected: T::DESCR, found: header.descr })
+        return Err(NpyError::DtypeMismatch {
+            expected: T::DESCR,
+            found: header.descr,
+        });
     }
     if header.fortran_order {
-        return Err(NpyError::FortranOrder)
+        return Err(NpyError::FortranOrder);
     }
-    // Check the remaining size supports the data
-    let mut data_cnt = 0;
-    for dim in &header.shape {
-        if data_cnt == 0 {
-            data_cnt = *dim;
-        } else {
-            data_cnt *= dim;
-        }
-    }
+    // Check the remaining size supports the data.
+    // An empty shape is a 0-d array holding exactly one element, and
+    // `product()` of an empty iterator is 1, which gives that for free.
+    let data_cnt: usize = header.shape.iter().product();
     let elem_bytes = size_of::<T>();
     let data_size = data_cnt * elem_bytes;
     if fbuf.len() != data_size {
-        return Err(NpyError::SizeMismatch { expected: data_size, found: fbuf.len() })
+        return Err(NpyError::SizeMismatch {
+            expected: data_size,
+            found: fbuf.len(),
+        });
     }
-    // Get the data and return
-    let mut data: Vec<T> = Vec::new();
-    let mut fbuf = fbuf;
-    for _ in 0..data_cnt {
-        let (data_buf, rest) = fbuf.split_at_checked(elem_bytes).ok_or(NpyError::FileTooShort(String::from("data")))?;
-        let elem = T::from_le_bytes(data_buf)?;
-        data.push(elem);
-        fbuf = rest;
-    }
-    Ok(Array { shape: header.shape, data: data })
+    // Get the data and return. The length check above guarantees
+    // `chunks_exact` yields exactly `data_cnt` chunks with no remainder.
+    let data = fbuf
+        .chunks_exact(elem_bytes)
+        .map(T::from_le_bytes)
+        .collect::<Result<Vec<T>, _>>()?;
+    Ok(Array {
+        shape: header.shape,
+        data,
+    })
 }
