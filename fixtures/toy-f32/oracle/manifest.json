@@ -1,0 +1,75 @@
+{
+  "attn_implementation": "eager",
+  "compute_dtype": "f32",
+  "files": {
+    "argmax.npy": {
+      "dtype": "uint32",
+      "shape": [
+        29
+      ]
+    },
+    "embed.npy": {
+      "dtype": "float32",
+      "shape": [
+        29,
+        64
+      ]
+    },
+    "final_norm.npy": {
+      "dtype": "float32",
+      "shape": [
+        29,
+        64
+      ]
+    },
+    "greedy.npy": {
+      "dtype": "uint32",
+      "shape": [
+        20
+      ]
+    },
+    "layer_0.npy": {
+      "dtype": "float32",
+      "shape": [
+        29,
+        64
+      ]
+    },
+    "layer_1.npy": {
+      "dtype": "float32",
+      "shape": [
+        29,
+        64
+      ]
+    },
+    "logits_last.npy": {
+      "dtype": "float32",
+      "shape": [
+        1024
+      ]
+    },
+    "token_ids.npy": {
+      "dtype": "uint32",
+      "shape": [
+        29
+      ]
+    }
+  },
+  "greedy_tokens": 20,
+  "hidden_size": 64,
+  "model": "toy-hf",
+  "num_hidden_layers": 2,
+  "num_tokens": 29,
+  "oracle_version": 1,
+  "prompt": "The quick brown fox jumps over the lazy dog. 你好 🦀 fn main() {",
+  "toy": {
+    "seed": 0,
+    "version": 1
+  },
+  "versions": {
+    "torch": "2.14.0",
+    "transformers": "5.16.1"
+  },
+  "vocab_size": 1024,
+  "weights_dtype": "f32"
+}

@@ -1,0 +1,9 @@
+{
+  "bos_token_id": null,
+  "do_sample": false,
+  "eos_token_id": [
+    1023,
+    1021
+  ],
+  "pad_token_id": 1021
+}

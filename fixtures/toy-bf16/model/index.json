@@ -1,0 +1,255 @@
+{
+  "alignment": 64,
+  "format_version": 1,
+  "tensors": {
+    "embed_tokens": {
+      "dtype": "bf16",
+      "file": "weights/embed.bin",
+      "offset": 0,
+      "shape": [
+        1024,
+        64
+      ],
+      "size_bytes": 131072
+    },
+    "layers.0.attn.k_proj.bias": {
+      "dtype": "f32",
+      "file": "weights/layers_0_1.bin",
+      "offset": 25088,
+      "shape": [
+        32
+      ],
+      "size_bytes": 128
+    },
+    "layers.0.attn.k_proj.weight": {
+      "dtype": "bf16",
+      "file": "weights/layers_0_1.bin",
+      "offset": 8448,
+      "shape": [
+        32,
+        64
+      ],
+      "size_bytes": 4096
+    },
+    "layers.0.attn.o_proj.weight": {
+      "dtype": "bf16",
+      "file": "weights/layers_0_1.bin",
+      "offset": 16640,
+      "shape": [
+        64,
+        64
+      ],
+      "size_bytes": 8192
+    },
+    "layers.0.attn.q_proj.bias": {
+      "dtype": "f32",
+      "file": "weights/layers_0_1.bin",
+      "offset": 24832,
+      "shape": [
+        64
+      ],
+      "size_bytes": 256
+    },
+    "layers.0.attn.q_proj.weight": {
+      "dtype": "bf16",
+      "file": "weights/layers_0_1.bin",
+      "offset": 256,
+      "shape": [
+        64,
+        64
+      ],
+      "size_bytes": 8192
+    },
+    "layers.0.attn.v_proj.bias": {
+      "dtype": "f32",
+      "file": "weights/layers_0_1.bin",
+      "offset": 25216,
+      "shape": [
+        32
+      ],
+      "size_bytes": 128
+    },
+    "layers.0.attn.v_proj.weight": {
+      "dtype": "bf16",
+      "file": "weights/layers_0_1.bin",
+      "offset": 12544,
+      "shape": [
+        32,
+        64
+      ],
+      "size_bytes": 4096
+    },
+    "layers.0.input_norm.weight": {
+      "dtype": "f32",
+      "file": "weights/layers_0_1.bin",
+      "offset": 0,
+      "shape": [
+        64
+      ],
+      "size_bytes": 256
+    },
+    "layers.0.mlp.down_proj.weight": {
+      "dtype": "bf16",
+      "file": "weights/layers_0_1.bin",
+      "offset": 58368,
+      "shape": [
+        64,
+        128
+      ],
+      "size_bytes": 16384
+    },
+    "layers.0.mlp.gate_proj.weight": {
+      "dtype": "bf16",
+      "file": "weights/layers_0_1.bin",
+      "offset": 25600,
+      "shape": [
+        128,
+        64
+      ],
+      "size_bytes": 16384
+    },
+    "layers.0.mlp.up_proj.weight": {
+      "dtype": "bf16",
+      "file": "weights/layers_0_1.bin",
+      "offset": 41984,
+      "shape": [
+        128,
+        64
+      ],
+      "size_bytes": 16384
+    },
+    "layers.0.post_attn_norm.weight": {
+      "dtype": "f32",
+      "file": "weights/layers_0_1.bin",
+      "offset": 25344,
+      "shape": [
+        64
+      ],
+      "size_bytes": 256
+    },
+    "layers.1.attn.k_proj.bias": {
+      "dtype": "f32",
+      "file": "weights/layers_0_1.bin",
+      "offset": 99840,
+      "shape": [
+        32
+      ],
+      "size_bytes": 128
+    },
+    "layers.1.attn.k_proj.weight": {
+      "dtype": "bf16",
+      "file": "weights/layers_0_1.bin",
+      "offset": 83200,
+      "shape": [
+        32,
+        64
+      ],
+      "size_bytes": 4096
+    },
+    "layers.1.attn.o_proj.weight": {
+      "dtype": "bf16",
+      "file": "weights/layers_0_1.bin",
+      "offset": 91392,
+      "shape": [
+        64,
+        64
+      ],
+      "size_bytes": 8192
+    },
+    "layers.1.attn.q_proj.bias": {
+      "dtype": "f32",
+      "file": "weights/layers_0_1.bin",
+      "offset": 99584,
+      "shape": [
+        64
+      ],
+      "size_bytes": 256
+    },
+    "layers.1.attn.q_proj.weight": {
+      "dtype": "bf16",
+      "file": "weights/layers_0_1.bin",
+      "offset": 75008,
+      "shape": [
+        64,
+        64
+      ],
+      "size_bytes": 8192
+    },
+    "layers.1.attn.v_proj.bias": {
+      "dtype": "f32",
+      "file": "weights/layers_0_1.bin",
+      "offset": 99968,
+      "shape": [
+        32
+      ],
+      "size_bytes": 128
+    },
+    "layers.1.attn.v_proj.weight": {
+      "dtype": "bf16",
+      "file": "weights/layers_0_1.bin",
+      "offset": 87296,
+      "shape": [
+        32,
+        64
+      ],
+      "size_bytes": 4096
+    },
+    "layers.1.input_norm.weight": {
+      "dtype": "f32",
+      "file": "weights/layers_0_1.bin",
+      "offset": 74752,
+      "shape": [
+        64
+      ],
+      "size_bytes": 256
+    },
+    "layers.1.mlp.down_proj.weight": {
+      "dtype": "bf16",
+      "file": "weights/layers_0_1.bin",
+      "offset": 133120,
+      "shape": [
+        64,
+        128
+      ],
+      "size_bytes": 16384
+    },
+    "layers.1.mlp.gate_proj.weight": {
+      "dtype": "bf16",
+      "file": "weights/layers_0_1.bin",
+      "offset": 100352,
+      "shape": [
+        128,
+        64
+      ],
+      "size_bytes": 16384
+    },
+    "layers.1.mlp.up_proj.weight": {
+      "dtype": "bf16",
+      "file": "weights/layers_0_1.bin",
+      "offset": 116736,
+      "shape": [
+        128,
+        64
+      ],
+      "size_bytes": 16384
+    },
+    "layers.1.post_attn_norm.weight": {
+      "dtype": "f32",
+      "file": "weights/layers_0_1.bin",
+      "offset": 100096,
+      "shape": [
+        64
+      ],
+      "size_bytes": 256
+    },
+    "norm.weight": {
+      "dtype": "f32",
+      "file": "weights/embed.bin",
+      "offset": 131072,
+      "shape": [
+        64
+      ],
+      "size_bytes": 256
+    }
+  }
+}
