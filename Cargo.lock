@@ -3,5 +3,16 @@
 version = 4
 
 [[package]]
+name = "ops"
+version = "0.1.0"
+dependencies = [
+ "tensor",
+]
+
+[[package]]
+name = "tensor"
+version = "0.1.0"
+
+[[package]]
 name = "testutil"
 version = "0.1.0"
