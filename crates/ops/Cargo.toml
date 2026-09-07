@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 tensor = { workspace = true }
+
+[dev-dependencies]
+testutil = { path = "../testutil" }

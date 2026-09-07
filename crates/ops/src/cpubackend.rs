@@ -35,13 +35,13 @@ fn matmul_assert(a: &Tensor, b: &Tensor, out: &Tensor) {
 
 fn get_index(t: &Tensor, i: usize, j: usize) -> usize {
     let m = t.shape.get_dim(1).unwrap_or_default();
-    return m * i + j;
+    m * i + j
 }
 
 fn get_row(t: &Tensor, i: usize) -> &[f32] {
     let start = get_index(t, i, 0);
     let end = start + t.shape.get_dim(1).unwrap_or_default();
-    return &t.data[start..end];
+    &t.data[start..end]
 }
 
 fn dot_product(a: &[f32], b: &[f32]) -> f32 {
@@ -51,111 +51,148 @@ fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use tensor::Shape;
-
     use super::*;
+    use tensor::Shape;
+    use testutil::{DEFAULT_TOL, assert_close};
+
+    fn tensor(dims: &[usize], data: &[f32]) -> Tensor {
+        Tensor {
+            shape: Shape::new(dims),
+            data: data.to_vec(),
+        }
+    }
+
+    /// A[2,3].
+    fn a_2x3() -> Tensor {
+        tensor(
+            &[2, 3],
+            &[
+                1.5, -2.0, 0.0, // row 0
+                -0.5, 3.0, -1.5, // row 1
+            ],
+        )
+    }
+
+    /// B[4,3]. Stored in the [n, k] layout `matmul` expects, i.e. each row
+    /// here is a column of the mathematical B — no transpose is performed.
+    fn b_4x3() -> Tensor {
+        tensor(
+            &[4, 3],
+            &[
+                4.0, 0.0, -2.0, // row 0
+                -1.0, 2.5, 0.0, // row 1
+                0.0, -3.0, 1.0, // row 2
+                2.0, 0.5, -4.0, // row 3
+            ],
+        )
+    }
 
     #[test]
     fn matmul_valid() {
-        let a = Tensor {
-            shape: Shape::new(&[2, 3]),
-            data: [
-                1.5, -2.0, 0.0, // row 0
-                -0.5, 3.0, -1.5, // row 1
-            ]
-            .to_vec(),
-        };
-        let b = Tensor {
-            shape: Shape::new(&[4, 3]),
-            // Note: Data is transposed
-            data: [
-                4.0, 0.0, -2.0, // col 0
-                -1.0, 2.5, 0.0, // col 1
-                0.0, -3.0, 1.0, // col 2
-                2.0, 0.5, -4.0, // col 3
-            ]
-            .to_vec(),
-        };
-        let mut out = Tensor {
-            shape: Shape::new(&[2, 4]),
-            data: vec![0.0; 8],
-        };
-        let backend = CpuBackend {};
-        backend.matmul(&a, &b, &mut out);
-        let expected = Tensor {
-            shape: Shape::new(&[2, 4]),
-            data: [
+        let mut out = tensor(&[2, 4], &[0.0; 8]);
+        CpuBackend {}.matmul(&a_2x3(), &b_4x3(), &mut out);
+
+        assert_eq!(out.shape, Shape::new(&[2, 4]));
+        assert_close(
+            &out.data,
+            &[
                 6.0, -6.5, 6.0, 2.0, // row 0
                 1.0, 8.0, -10.5, 6.5, // row 1
-            ]
-            .to_vec(),
-        };
-        assert_eq!(expected, out);
+            ],
+            DEFAULT_TOL,
+        );
     }
 
     #[test]
     fn matmul_single_row() {
-        let a = Tensor {
-            shape: Shape::new(&[1, 3]),
-            data: [
-                1.5, -2.0, 0.0, // row 0
-            ]
-            .to_vec(),
-        };
-        let b = Tensor {
-            shape: Shape::new(&[4, 3]),
-            // Note: Data is transposed
-            data: [
-                4.0, 0.0, -2.0, // col 0
-                -1.0, 2.5, 0.0, // col 1
-                0.0, -3.0, 1.0, // col 2
-                2.0, 0.5, -4.0, // col 3
-            ]
-            .to_vec(),
-        };
-        let mut out = Tensor {
-            shape: Shape::new(&[1, 4]),
-            data: vec![0.0; 4],
-        };
-        let backend = CpuBackend {};
-        backend.matmul(&a, &b, &mut out);
-        let expected = Tensor {
-            shape: Shape::new(&[1, 4]),
-            data: [
-                6.0, -6.5, 6.0, 2.0, // row 0
-            ]
-            .to_vec(),
-        };
-        assert_eq!(expected, out);
+        let a = tensor(&[1, 3], &[1.5, -2.0, 0.0]);
+        let mut out = tensor(&[1, 4], &[0.0; 4]);
+        CpuBackend {}.matmul(&a, &b_4x3(), &mut out);
+
+        assert_eq!(out.shape, Shape::new(&[1, 4]));
+        assert_close(&out.data, &[6.0, -6.5, 6.0, 2.0], DEFAULT_TOL);
     }
 
-    #[should_panic]
     #[test]
-    fn matmul_invalid() {
-        let a = Tensor {
-            shape: Shape::new(&[2, 3]),
-            data: [
-                1.5, -2.0, 0.0, // row 0
-                -0.5, 3.0, -1.5, // row 1
-            ]
-            .to_vec(),
-        };
-        let b = Tensor {
-            shape: Shape::new(&[4, 2]),
-            // Note: Data is transposed
-            data: [
-                4.0, 0.0, // col 0
-                -1.0, 2.5, // col 1
-                0.0, -3.0, // col 2
-                2.0, 0.5, // col 3
-            ]
-            .to_vec(),
-        };
-        let mut out = Tensor {
-            shape: Shape::new(&[2, 4]),
-            data: vec![0.0; 8],
-        };
-        let backend = CpuBackend {};
-        backend.matmul(&a, &b, &mut out);
+    fn matmul_single_column() {
+        let b = tensor(&[1, 3], &[4.0, 0.0, -2.0]);
+        let mut out = tensor(&[2, 1], &[0.0; 2]);
+        CpuBackend {}.matmul(&a_2x3(), &b, &mut out);
+
+        assert_eq!(out.shape, Shape::new(&[2, 1]));
+        assert_close(&out.data, &[6.0, 1.0], DEFAULT_TOL);
+    }
+
+    /// k = 1 degenerates the dot product to a single multiply.
+    #[test]
+    fn matmul_k_of_one() {
+        let a = tensor(&[2, 1], &[3.0, -2.0]);
+        let b = tensor(&[3, 1], &[1.0, 0.5, -4.0]);
+        let mut out = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.matmul(&a, &b, &mut out);
+
+        assert_close(
+            &out.data,
+            &[
+                3.0, 1.5, -12.0, // row 0
+                -2.0, -1.0, 8.0, // row 1
+            ],
+            DEFAULT_TOL,
+        );
+    }
+
+    /// Every element of `out` must be written, not accumulated into. A stale
+    /// value surviving here would mean the loop skipped a cell.
+    #[test]
+    fn matmul_overwrites_every_element_of_out() {
+        let mut out = tensor(&[2, 4], &[999.0; 8]);
+        CpuBackend {}.matmul(&a_2x3(), &b_4x3(), &mut out);
+
+        assert_close(
+            &out.data,
+            &[6.0, -6.5, 6.0, 2.0, 1.0, 8.0, -10.5, 6.5],
+            DEFAULT_TOL,
+        );
+    }
+
+    // Rejection cases. Each `expected` pins a value unique to the assertion
+    // under test, so a panic from an earlier check cannot satisfy it.
+
+    #[test]
+    #[should_panic(expected = "assertion failed: a.is_valid()")]
+    fn matmul_rejects_shape_data_disagreement() {
+        let a = tensor(&[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0]); // 5 elems, needs 6
+        let mut out = tensor(&[2, 4], &[0.0; 8]);
+        CpuBackend {}.matmul(&a, &b_4x3(), &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "right: 1")]
+    fn matmul_rejects_non_2d_input() {
+        let a = tensor(&[6], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let mut out = tensor(&[2, 4], &[0.0; 8]);
+        CpuBackend {}.matmul(&a, &b_4x3(), &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "right: Some(7)")]
+    fn matmul_rejects_k_mismatch() {
+        let b = tensor(&[4, 7], &[0.0; 28]);
+        let mut out = tensor(&[2, 4], &[0.0; 8]);
+        CpuBackend {}.matmul(&a_2x3(), &b, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "right: Some(5)")]
+    fn matmul_rejects_wrong_out_rows() {
+        let mut out = tensor(&[5, 4], &[0.0; 20]);
+        CpuBackend {}.matmul(&a_2x3(), &b_4x3(), &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "right: Some(9)")]
+    fn matmul_rejects_wrong_out_cols() {
+        let mut out = tensor(&[2, 9], &[0.0; 18]);
+        CpuBackend {}.matmul(&a_2x3(), &b_4x3(), &mut out);
     }
 }
