@@ -1,4 +1,6 @@
-use crate::Backend;
+use std::assert_eq;
+
+use crate::{Backend, RopeTable, get_index};
 use tensor::Tensor;
 
 pub struct CpuBackend {}
@@ -33,6 +35,26 @@ impl Backend for CpuBackend {
             }
         }
     }
+
+    fn rope(&self, t: &Tensor, table: &RopeTable, m_start: usize, out: &mut Tensor) {
+        rope_assert(t, table, m_start, out);
+        let m_end = t.shape.get_dim(0).unwrap_or_default() + m_start;
+        for m in m_start..m_end {
+            let i = m - m_start;
+            let data_row = get_row(t, i);
+            let cos_row = get_row(&table.cos, m);
+            let sin_row = get_row(&table.sin, m);
+            for j_left in 0..cos_row.len() {
+                let cos = cos_row[j_left];
+                let sin = sin_row[j_left];
+                let j_right = j_left + cos_row.len();
+                let out_idx_left = get_index(out, i, j_left);
+                let out_idx_right = get_index(out, i, j_right);
+                out.data[out_idx_left] = cos * data_row[j_left] - sin * data_row[j_right];
+                out.data[out_idx_right] = sin * data_row[j_left] + cos * data_row[j_right];
+            }
+        }
+    }
 }
 
 // Helper functions
@@ -58,9 +80,24 @@ fn rmsnorm_assert(t: &Tensor, w: &Tensor, out: &Tensor) {
     assert_eq!(t.shape, out.shape);
 }
 
-fn get_index(t: &Tensor, i: usize, j: usize) -> usize {
-    let m = t.shape.get_dim(1).unwrap_or_default();
-    m * i + j
+fn rope_assert(t: &Tensor, table: &RopeTable, m_start: usize, out: &Tensor) {
+    assert!(t.is_valid());
+    assert!(out.is_valid());
+    assert!(table.cos.is_valid());
+    assert!(table.sin.is_valid());
+    assert_eq!(table.cos.shape, table.sin.shape);
+    assert_eq!(t.shape, out.shape);
+    assert_eq!(2, t.shape.ndims());
+    assert_eq!(2, table.cos.shape.ndims());
+    assert_eq!(2, table.sin.shape.ndims());
+    assert_eq!(
+        t.shape.get_dim(1).unwrap_or_default(),
+        2 * table.cos.shape.get_dim(1).unwrap_or_default()
+    );
+    assert!(
+        table.cos.shape.get_dim(0).unwrap_or_default()
+            >= m_start + t.shape.get_dim(0).unwrap_or_default()
+    );
 }
 
 fn get_row(t: &Tensor, i: usize) -> &[f32] {
@@ -365,5 +402,260 @@ mod tests {
         let w = tensor(&[3], &[1.0; 3]);
         let mut out = tensor(&[3, 2], &[0.0; 6]); // same element count, wrong shape
         CpuBackend {}.rmsnorm(&a_2x3(), &w, 1e-6, &mut out);
+    }
+
+    #[test]
+    fn rope_valid_using_vector() {
+        const HEAD_DIM: usize = 4;
+        let t = tensor(&[1, HEAD_DIM], &[0.497, -0.138, 0.648, 1.523]);
+        let mut out = tensor(&[1, HEAD_DIM], &[0.0; 4]);
+        let table = RopeTable::new(HEAD_DIM, 10, 10000.0);
+        // M = 0
+        CpuBackend {}.rope(&t, &table, 0, &mut out);
+        assert_close(&out.data, &[0.497, -0.138, 0.648, 1.523], DEFAULT_TOL);
+        // M = 1
+        CpuBackend {}.rope(&t, &table, 1, &mut out);
+        assert_close(
+            &out.data,
+            &[-0.276743, -0.153223, 0.768327, 1.521544],
+            DEFAULT_TOL,
+        );
+        // M = 2
+        CpuBackend {}.rope(&t, &table, 2, &mut out);
+        assert_close(
+            &out.data,
+            &[-0.796050, -0.168430, 0.182258, 1.519936],
+            DEFAULT_TOL,
+        );
+        // M = 3
+        CpuBackend {}.rope(&t, &table, 3, &mut out);
+        assert_close(
+            &out.data,
+            &[-0.583472, -0.183621, -0.571378, 1.518175],
+            DEFAULT_TOL,
+        );
+    }
+
+    #[test]
+    fn rope_valid_using_matrix() {
+        const HEAD_DIM: usize = 6;
+        const NUM_ROWS: usize = 5;
+        let t = tensor(
+            &[NUM_ROWS, HEAD_DIM],
+            &[
+                0.497, -0.138, 0.648, 1.523, -0.234, 0.812, // m = 0
+                -0.345, 0.781, -0.112, 0.452, 1.104, -0.673, // m = 1
+                0.912, -0.543, 0.321, -0.801, 0.219, -0.456, // m = 2
+                -0.123, 0.654, -0.987, 0.314, -0.876, 0.543, // m = 3
+                0.765, -0.432, 0.198, -0.541, 0.632, -0.879, // m = 4
+            ],
+        );
+        let mut out = tensor(&[NUM_ROWS, HEAD_DIM], &[0.0; HEAD_DIM * NUM_ROWS]);
+        let table = RopeTable::new(HEAD_DIM, 10, 10000.0);
+        CpuBackend {}.rope(&t, &table, 0, &mut out);
+        assert_close(
+            &out.data,
+            &[
+                0.497,
+                -0.138,
+                0.648,
+                1.523,
+                -0.234,
+                0.812, // m = 0
+                -0.56674916,
+                0.7289341,
+                -0.11054981,
+                -0.04609085,
+                1.1390488,
+                -0.6732397, // m = 1
+                0.3488213,
+                -0.5609629,
+                0.32296187,
+                1.1626129,
+                0.16772175,
+                -0.4546126, // m = 2
+                0.0774574,
+                0.7692569,
+                -0.99048895,
+                -0.3282154,
+                -0.776747,
+                0.5366094, // m = 3
+                -0.9094675,
+                -0.541242,
+                0.20556755,
+                -0.2253327,
+                0.5413918,
+                -0.87726104, // m = 4
+            ],
+            DEFAULT_TOL,
+        );
+    }
+
+    /// [4, 8] input shared by the rope property tests below.
+    fn rope_input_4x8() -> Tensor {
+        tensor(
+            &[4, 8],
+            &[
+                0.497, -0.138, 0.648, 1.523, -0.234, 0.812, -0.345, 0.781, // row 0
+                -0.112, 0.452, 1.104, -0.673, 0.912, -0.543, 0.321, -0.801, // row 1
+                0.219, -0.456, -0.123, 0.654, -0.987, 0.314, -0.876, 0.543, // row 2
+                0.765, -0.432, 0.198, -0.541, 0.632, -0.879, 0.111, -0.222, // row 3
+            ],
+        )
+    }
+
+    /// Copies row `i` of a 2-D tensor into its own [1, cols] tensor.
+    fn row_tensor(t: &Tensor, i: usize) -> Tensor {
+        let cols = t.shape.get_dim(1).unwrap();
+        tensor(&[1, cols], get_row(t, i))
+    }
+
+    /// Prefill and decode must agree: rotating several rows at once from
+    /// `m_start` gives the same result as rotating each row alone at its own
+    /// position. Phase 4's KV cache relies on this, and it catches mixing up
+    /// the input row `i` with the table row `m`. The existing tests only
+    /// exercise multi-row input at `m_start = 0`, where `i == m`.
+    #[test]
+    fn rope_multi_row_matches_per_row_decode() {
+        let t = rope_input_4x8();
+        let table = RopeTable::new(8, 16, 10000.0);
+        let m_start = 3;
+        let mut batched = tensor(&[4, 8], &[0.0; 32]);
+        CpuBackend {}.rope(&t, &table, m_start, &mut batched);
+
+        for i in 0..4 {
+            let mut single = tensor(&[1, 8], &[0.0; 8]);
+            CpuBackend {}.rope(&row_tensor(&t, i), &table, m_start + i, &mut single);
+            assert_close(get_row(&batched, i), &single.data, DEFAULT_TOL);
+        }
+    }
+
+    /// Each (j, j + n/2) pair is rotated as a 2-D vector, so its length must
+    /// not change. This is also a convention check: interleaved RoPE preserves
+    /// (2j, 2j + 1) pairs instead, and would fail here.
+    #[test]
+    fn rope_preserves_pair_lengths() {
+        let t = rope_input_4x8();
+        let table = RopeTable::new(8, 16, 10000.0);
+        let mut out = tensor(&[4, 8], &[0.0; 32]);
+        CpuBackend {}.rope(&t, &table, 9, &mut out);
+
+        for i in 0..4 {
+            let (x, y) = (get_row(&t, i), get_row(&out, i));
+            for j in 0..4 {
+                let before = x[j] * x[j] + x[j + 4] * x[j + 4];
+                let after = y[j] * y[j] + y[j + 4] * y[j + 4];
+                assert_close(&[after], &[before], DEFAULT_TOL);
+            }
+        }
+    }
+
+    /// The point of RoPE: the dot product of a rotated query and key depends
+    /// only on the distance between their positions.
+    #[test]
+    fn rope_dot_product_depends_only_on_relative_position() {
+        let base = rope_input_4x8();
+        let (q, k) = (row_tensor(&base, 0), row_tensor(&base, 1));
+        let table = RopeTable::new(8, 16, 10000.0);
+
+        let rotated_dot = |m_q: usize, m_k: usize| -> f32 {
+            let mut rq = tensor(&[1, 8], &[0.0; 8]);
+            let mut rk = tensor(&[1, 8], &[0.0; 8]);
+            CpuBackend {}.rope(&q, &table, m_q, &mut rq);
+            CpuBackend {}.rope(&k, &table, m_k, &mut rk);
+            dot_product(&rq.data, &rk.data)
+        };
+
+        // Every pair here is 2 positions apart.
+        let reference = rotated_dot(2, 0);
+        assert_close(&[rotated_dot(5, 3)], &[reference], DEFAULT_TOL);
+        assert_close(&[rotated_dot(13, 11)], &[reference], DEFAULT_TOL);
+        // A different distance must give a different result, or the checks
+        // above prove nothing.
+        assert!((rotated_dot(3, 0) - reference).abs() > 1e-3);
+    }
+
+    /// Rotate-half pairs element j with j + n/2. A one-hot input at index 1
+    /// may only produce output at indices 1 and 5; interleaved RoPE would
+    /// produce output at 0 and 1 instead.
+    #[test]
+    fn rope_one_hot_pairs_j_with_j_plus_half() {
+        let mut data = [0.0; 8];
+        data[1] = 1.0;
+        let t = tensor(&[1, 8], &data);
+        let table = RopeTable::new(8, 4, 10000.0);
+        let mut out = tensor(&[1, 8], &[0.0; 8]);
+        CpuBackend {}.rope(&t, &table, 1, &mut out);
+
+        // Table row 1, column 1: pair 1 at position 1.
+        let (c, s) = (get_row(&table.cos, 1)[1], get_row(&table.sin, 1)[1]);
+        assert_close(
+            &out.data,
+            &[0.0, c, 0.0, 0.0, 0.0, s, 0.0, 0.0],
+            DEFAULT_TOL,
+        );
+    }
+
+    #[test]
+    fn rope_overwrites_every_element_of_out() {
+        let t = rope_input_4x8();
+        let table = RopeTable::new(8, 16, 10000.0);
+        let mut expected = tensor(&[4, 8], &[0.0; 32]);
+        CpuBackend {}.rope(&t, &table, 2, &mut expected);
+
+        let mut out = tensor(&[4, 8], &[999.0; 32]);
+        CpuBackend {}.rope(&t, &table, 2, &mut out);
+        assert_close(&out.data, &expected.data, DEFAULT_TOL);
+    }
+
+    /// Decoding at the last table row is allowed: `m_start + rows == max_seq`.
+    /// Pins the bounds check as `>=` rather than `>`.
+    #[test]
+    fn rope_accepts_last_table_row() {
+        let t = row_tensor(&rope_input_4x8(), 0);
+        let table = RopeTable::new(8, 7, 10000.0);
+        let mut out = tensor(&[1, 8], &[0.0; 8]);
+        CpuBackend {}.rope(&t, &table, 6, &mut out);
+        assert!(out.data.iter().any(|x| *x != 0.0));
+    }
+
+    // Rejection cases. Each `expected` pins a value unique to the assertion
+    // under test, so a panic from an earlier check cannot satisfy it.
+
+    /// The case you'll actually hit in practice: decode runs past `max_seq`.
+    #[test]
+    #[should_panic(expected = "m_start + t.shape.get_dim(0)")]
+    fn rope_rejects_positions_past_table_end() {
+        let t = row_tensor(&rope_input_4x8(), 0);
+        let table = RopeTable::new(8, 7, 10000.0);
+        let mut out = tensor(&[1, 8], &[0.0; 8]);
+        CpuBackend {}.rope(&t, &table, 7, &mut out); // table rows are 0..=6
+    }
+
+    #[test]
+    #[should_panic(expected = "right: 8")]
+    fn rope_rejects_head_dim_table_mismatch() {
+        let t = tensor(&[1, 6], &[0.0; 6]);
+        let table = RopeTable::new(8, 7, 10000.0);
+        let mut out = tensor(&[1, 6], &[0.0; 6]);
+        CpuBackend {}.rope(&t, &table, 0, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "dims: [8, 1]")]
+    fn rope_rejects_out_shape_mismatch() {
+        let t = row_tensor(&rope_input_4x8(), 0); // [1, 8]
+        let table = RopeTable::new(8, 7, 10000.0);
+        let mut out = tensor(&[8, 1], &[0.0; 8]); // same element count, wrong shape
+        CpuBackend {}.rope(&t, &table, 0, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "right: 1")]
+    fn rope_rejects_non_2d_input() {
+        let t = tensor(&[8], &[0.0; 8]);
+        let table = RopeTable::new(8, 7, 10000.0);
+        let mut out = tensor(&[8], &[0.0; 8]);
+        CpuBackend {}.rope(&t, &table, 0, &mut out);
     }
 }
