@@ -55,6 +55,36 @@ impl Backend for CpuBackend {
             }
         }
     }
+
+    fn softmax(&self, t: &Tensor, out: &mut Tensor) {
+        softmax_assert(t, out);
+        let m = t.shape.get_dim(0).unwrap_or_default();
+        for i in 0..m {
+            let data_row = get_row(t, i);
+            let max = data_row
+                .iter()
+                .copied()
+                .reduce(f32::max)
+                .unwrap_or_default();
+            if max == f32::NEG_INFINITY {
+                for j in 0..data_row.len() {
+                    let idx = get_index(out, i, j);
+                    out.data[idx] = f32::NAN;
+                }
+            } else {
+                for (j, x) in data_row.iter().enumerate() {
+                    let idx = get_index(out, i, j);
+                    let y = (x - max).exp();
+                    out.data[idx] = y;
+                }
+                let sum: f32 = get_row(out, i).iter().sum();
+                for j in 0..data_row.len() {
+                    let idx = get_index(out, i, j);
+                    out.data[idx] /= sum;
+                }
+            }
+        }
+    }
 }
 
 // Helper functions
@@ -98,6 +128,13 @@ fn rope_assert(t: &Tensor, table: &RopeTable, m_start: usize, out: &Tensor) {
         table.cos.shape.get_dim(0).unwrap_or_default()
             >= m_start + t.shape.get_dim(0).unwrap_or_default()
     );
+}
+
+fn softmax_assert(t: &Tensor, out: &Tensor) {
+    assert!(t.is_valid());
+    assert!(out.is_valid());
+    assert_eq!(t.shape, out.shape);
+    assert_eq!(2, t.shape.ndims());
 }
 
 fn get_row(t: &Tensor, i: usize) -> &[f32] {
@@ -268,7 +305,7 @@ mod tests {
             &out.data,
             &[
                 1.0392302, -2.7712806, 0.0, // row 0
-                -0.2553769, 3.0645231, -0.3830654, // row 1
+                -0.2553769, 3.064523, -0.3830654, // row 1
             ],
             DEFAULT_TOL,
         );
@@ -354,7 +391,7 @@ mod tests {
             &out.data,
             &[
                 1.0392302, -2.7712806, 0.0, // row 0
-                -0.2553769, 3.0645231, -0.3830654, // row 1
+                -0.2553769, 3.064523, -0.3830654, // row 1
             ],
             DEFAULT_TOL,
         );
@@ -657,5 +694,226 @@ mod tests {
         let table = RopeTable::new(8, 7, 10000.0);
         let mut out = tensor(&[8], &[0.0; 8]);
         CpuBackend {}.rope(&t, &table, 0, &mut out);
+    }
+
+    #[test]
+    fn softmax_valid_using_vector() {
+        let t = tensor(&[1, 3], &[1.0, 2.0, 3.0]);
+        let mut out = tensor(&[1, 3], &[0.0; 3]);
+        CpuBackend {}.softmax(&t, &mut out);
+        assert_eq!(out.shape, Shape::new(&[1, 3]));
+        assert_close(
+            &out.data,
+            &[
+                0.09003057, 0.24472847, 0.66524096, // row 0
+            ],
+            DEFAULT_TOL,
+        );
+    }
+
+    #[test]
+    fn softmax_valid_using_matrix() {
+        let t = tensor(
+            &[5, 6],
+            &[
+                0.5, -1.2, 3.3, 0.0, 2.1, -0.7, // row 0
+                1.0, 1.0, 1.0, 1.0, 1.0, 1.0, // row 1
+                -2.0, -3.5, -0.25, -1.0, -4.0, -0.5, // row 2
+                1e+01, 9.5, 8.0, 10.5, 7.25, 9.0, // row 3
+                0.1, 0.2, 0.3, 0.4, 0.5, 0.6, // row 4
+            ],
+        );
+        let mut out = tensor(&[5, 6], &[0.0; 30]);
+        CpuBackend {}.softmax(&t, &mut out);
+        assert_eq!(out.shape, Shape::new(&[5, 6]));
+        assert_close(
+            &out.data,
+            &[
+                0.042574773,
+                0.0077777096,
+                0.7001271,
+                0.025822905,
+                0.21087423,
+                0.012823275, // row 0
+                0.16666667,
+                0.16666667,
+                0.16666667,
+                0.16666667,
+                0.16666667,
+                0.16666667, // row 1
+                0.06986637,
+                0.015589293,
+                0.40205317,
+                0.18991646,
+                0.009455384,
+                0.31311932, // row 2
+                0.2616161,
+                0.15867819,
+                0.03540589,
+                0.43133205,
+                0.016724559,
+                0.09624319, // row 3
+                0.12792667,
+                0.14138083,
+                0.15624998,
+                0.17268294,
+                0.19084416,
+                0.21091542, // row 4
+            ],
+            DEFAULT_TOL,
+        );
+    }
+
+    /// Every output row is a probability distribution: entries in (0, 1),
+    /// summing to 1.
+    #[test]
+    fn softmax_rows_sum_to_one() {
+        let t = rope_input_4x8();
+        let mut out = tensor(&[4, 8], &[0.0; 32]);
+        CpuBackend {}.softmax(&t, &mut out);
+        for i in 0..4 {
+            let row = get_row(&out, i);
+            assert!(row.iter().all(|p| *p > 0.0 && *p < 1.0), "row {i}: {row:?}");
+            assert_close(&[row.iter().sum::<f32>()], &[1.0], DEFAULT_TOL);
+        }
+    }
+
+    /// Softmax is monotonic: a larger input always gets a larger probability.
+    /// Catches a flipped exponent such as `exp(max - x)`.
+    #[test]
+    fn softmax_preserves_order_within_a_row() {
+        let t = rope_input_4x8();
+        let mut out = tensor(&[4, 8], &[0.0; 32]);
+        CpuBackend {}.softmax(&t, &mut out);
+        for i in 0..4 {
+            let (x, y) = (get_row(&t, i), get_row(&out, i));
+            for j in 0..8 {
+                for k in 0..8 {
+                    if x[j] < x[k] {
+                        assert!(y[j] < y[k], "row {i}: x[{j}] < x[{k}] but y[{j}] >= y[{k}]");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Adding a constant to a row must not change its softmax. With logits
+    /// near +/-1000, `exp` overflows or underflows f32 (overflow starts around
+    /// 88.7) unless the row max is subtracted first, so this also proves the
+    /// implementation is numerically stable.
+    #[test]
+    fn softmax_is_shift_invariant_and_stable_for_large_logits() {
+        let t = tensor(
+            &[3, 3],
+            &[
+                1.0, 2.0, 3.0, // row 0: reference
+                1000.0, 1001.0, 1002.0, // row 1: naive exp overflows to inf
+                -1000.0, -999.0, -998.0, // row 2: naive exp underflows to 0
+            ],
+        );
+        let mut out = tensor(&[3, 3], &[0.0; 9]);
+        CpuBackend {}.softmax(&t, &mut out);
+
+        let reference = [0.09003057, 0.24472847, 0.66524096];
+        for i in 0..3 {
+            assert_close(get_row(&out, i), &reference, DEFAULT_TOL);
+        }
+    }
+
+    /// The shape softmax actually sees in attention: a score matrix with -inf
+    /// above the diagonal. Masked entries must be exactly 0.0, and the rest
+    /// of each row must renormalize among themselves.
+    #[test]
+    fn softmax_causal_mask() {
+        let ninf = f32::NEG_INFINITY;
+        let t = tensor(
+            &[3, 3],
+            &[
+                0.5, ninf, ninf, // query 0 sees key 0
+                1.0, 2.0, ninf, // query 1 sees keys 0..=1
+                1.0, 2.0, 3.0, // query 2 sees keys 0..=2
+            ],
+        );
+        let mut out = tensor(&[3, 3], &[0.0; 9]);
+        CpuBackend {}.softmax(&t, &mut out);
+
+        // Exact, not approximate: a masked position must contribute nothing.
+        for idx in [1, 2, 5] {
+            assert_eq!(out.data[idx], 0.0, "masked index {idx}");
+        }
+        assert_close(
+            &out.data,
+            &[
+                1.0, 0.0, 0.0, // row 0
+                0.26894142, 0.7310586, 0.0, // row 1
+                0.09003057, 0.24472847, 0.66524096, // row 2
+            ],
+            DEFAULT_TOL,
+        );
+    }
+
+    /// With one column there is only one choice, so it gets all the mass.
+    #[test]
+    fn softmax_single_column_is_one() {
+        let t = tensor(&[3, 1], &[-5.0, 0.0, 42.0]);
+        let mut out = tensor(&[3, 1], &[0.0; 3]);
+        CpuBackend {}.softmax(&t, &mut out);
+        assert_close(&out.data, &[1.0, 1.0, 1.0], DEFAULT_TOL);
+    }
+
+    /// A NaN input must not be silently dropped. `f32::max` ignores NaN, so
+    /// the row max is still finite here; the NaN has to show up through the
+    /// sum. PyTorch returns an all-NaN row in this case.
+    #[test]
+    fn softmax_propagates_nan() {
+        let t = tensor(&[2, 3], &[1.0, f32::NAN, 2.0, 1.0, 2.0, 3.0]);
+        let mut out = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.softmax(&t, &mut out);
+        assert!(
+            get_row(&out, 0).iter().all(|p| p.is_nan()),
+            "row 0: {:?}",
+            get_row(&out, 0)
+        );
+        // The NaN must not leak into the next row.
+        assert_close(
+            get_row(&out, 1),
+            &[0.09003057, 0.24472847, 0.66524096],
+            DEFAULT_TOL,
+        );
+    }
+
+    #[test]
+    fn softmax_overwrites_every_element_of_out() {
+        let t = rope_input_4x8();
+        let mut expected = tensor(&[4, 8], &[0.0; 32]);
+        CpuBackend {}.softmax(&t, &mut expected);
+
+        let mut out = tensor(&[4, 8], &[999.0; 32]);
+        CpuBackend {}.softmax(&t, &mut out);
+        assert_close(&out.data, &expected.data, DEFAULT_TOL);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed: t.is_valid()")]
+    fn softmax_rejects_invalid_input() {
+        let t = tensor(&[2, 3], &[1.0; 5]); // 5 elements, shape needs 6
+        let mut out = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.softmax(&t, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "dims: [3, 2]")]
+    fn softmax_rejects_out_shape_mismatch() {
+        let t = tensor(&[2, 3], &[1.0; 6]);
+        let mut out = tensor(&[3, 2], &[0.0; 6]); // same element count, wrong shape
+        CpuBackend {}.softmax(&t, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "right: 1")]
+    fn softmax_rejects_non_2d_input() {
+        let t = tensor(&[6], &[1.0; 6]);
+        let mut out = tensor(&[6], &[0.0; 6]);
+        CpuBackend {}.softmax(&t, &mut out);
     }
 }

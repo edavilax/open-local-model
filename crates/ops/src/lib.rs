@@ -74,6 +74,12 @@ pub trait Backend {
     /// `m_start` is the starting index for the token offset. An input tensor of
     /// N row will provide output for token positions [m_start, m_start + N).
     fn rope(&self, t: &Tensor, table: &RopeTable, m_start: usize, out: &mut Tensor);
+
+    /// Calculates the softmax of the input tensor, and provides the result to
+    /// `out`.
+    /// 
+    /// This method applies softmax row-wise.
+    fn softmax(&self, t: &Tensor, out: &mut Tensor);
 }
 
 // Helper functions
