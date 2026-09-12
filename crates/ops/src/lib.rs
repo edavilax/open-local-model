@@ -77,9 +77,12 @@ pub trait Backend {
 
     /// Calculates the softmax of the input tensor, and provides the result to
     /// `out`.
-    /// 
+    ///
     /// This method applies softmax row-wise.
     fn softmax(&self, t: &Tensor, out: &mut Tensor);
+
+    // Calculates Sigmoid Linear Unit (SiLU), and provides the results to `out`.
+    fn silu(&self, t: &Tensor, out: &mut Tensor);
 }
 
 // Helper functions

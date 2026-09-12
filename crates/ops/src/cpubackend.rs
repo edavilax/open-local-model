@@ -85,6 +85,13 @@ impl Backend for CpuBackend {
             }
         }
     }
+
+    fn silu(&self, t: &Tensor, out: &mut Tensor) {
+        silu_assert(t, out);
+        for (i, x) in t.data.iter().enumerate() {
+            out.data[i] = x / (1.0 + (-1.0 * x).exp());
+        }
+    }
 }
 
 // Helper functions
@@ -135,6 +142,12 @@ fn softmax_assert(t: &Tensor, out: &Tensor) {
     assert!(out.is_valid());
     assert_eq!(t.shape, out.shape);
     assert_eq!(2, t.shape.ndims());
+}
+
+fn silu_assert(t: &Tensor, out: &Tensor) {
+    assert!(t.is_valid());
+    assert!(out.is_valid());
+    assert_eq!(t.shape, out.shape);
 }
 
 fn get_row(t: &Tensor, i: usize) -> &[f32] {
@@ -915,5 +928,138 @@ mod tests {
         let t = tensor(&[6], &[1.0; 6]);
         let mut out = tensor(&[6], &[0.0; 6]);
         CpuBackend {}.softmax(&t, &mut out);
+    }
+
+    #[test]
+    fn silu_valid_using_vector() {
+        let t = tensor(&[1, 3], &[0.0, 1.0, -1.0]);
+        let mut out = tensor(&[1, 3], &[0.0; 3]);
+        CpuBackend {}.silu(&t, &mut out);
+        assert_eq!(out.shape, Shape::new(&[1, 3]));
+        assert_close(&out.data, &[0.0, 0.7310586, -0.26894143], DEFAULT_TOL);
+    }
+
+    #[test]
+    fn silu_valid_using_matrix() {
+        let t = tensor(
+            &[4, 6],
+            &[
+                -1.2785, -1.0, -0.5, 0.0, 0.5, 1.0, // row 0
+                2.0, 3.0, -2.0, -3.0, 4.0, -4.0, // row 1
+                0.1, -0.1, 0.25, -0.25, 10.0, -10.0, // row 2
+                5.5, -5.5, 0.75, -0.75, 1.5, -1.5, // row 3
+            ],
+        );
+        let mut out = tensor(&[4, 6], &[0.0; 24]);
+        CpuBackend {}.silu(&t, &mut out);
+        assert_eq!(out.shape, Shape::new(&[4, 6]));
+        assert_close(
+            &out.data,
+            &[
+                -0.27846456,
+                -0.26894143,
+                -0.18877034,
+                0.0,
+                0.31122968,
+                0.7310586, // row 0
+                1.7615942,
+                2.8577223,
+                -0.23840584,
+                -0.14227761,
+                3.928055,
+                -0.07194484, // row 1
+                0.05249792,
+                -0.04750208,
+                0.14054413,
+                -0.109455876,
+                9.999546,
+                -0.0004539787, // row 2
+                5.4776144,
+                -0.022385757,
+                0.50938404,
+                -0.24061598,
+                1.2263618,
+                -0.27363828, // row 3
+            ],
+            DEFAULT_TOL,
+        );
+    }
+
+    /// Large magnitudes must not produce inf or NaN. `exp(-x)` overflows f32
+    /// for x below about -88.7, and `x / inf` gives the correct limit of 0.
+    #[test]
+    fn silu_handles_large_magnitudes() {
+        let t = tensor(&[1, 6], &[100.0, -100.0, 88.0, -88.0, 20.0, -20.0]);
+        let mut out = tensor(&[1, 6], &[0.0; 6]);
+        CpuBackend {}.silu(&t, &mut out);
+
+        assert!(out.data.iter().all(|y| y.is_finite()), "{:?}", out.data);
+        // Large positive passes through; large negative decays to zero.
+        assert_close(&out.data, &[100.0, 0.0, 88.0, 0.0, 20.0, 0.0], DEFAULT_TOL);
+    }
+
+    /// SiLU is not monotonic: it dips to about -0.2785 near x = -1.2785, then
+    /// climbs back toward 0. Points further out in either direction must sit
+    /// above the dip.
+    #[test]
+    fn silu_has_a_minimum_near_negative_1_2785() {
+        let t = tensor(&[1, 5], &[-6.0, -3.0, -1.2785, -0.5, -0.1]);
+        let mut out = tensor(&[1, 5], &[0.0; 5]);
+        CpuBackend {}.silu(&t, &mut out);
+
+        let dip = out.data[2];
+        assert_close(&[dip], &[-0.27846456], DEFAULT_TOL);
+        for (i, y) in out.data.iter().enumerate() {
+            if i != 2 {
+                assert!(*y > dip, "index {i} = {y} should exceed the dip {dip}");
+            }
+        }
+    }
+
+    /// Elementwise means output `i` depends only on input `i`, so reversing the
+    /// input must reverse the output. Catches an indexing mistake that a
+    /// symmetric input would hide.
+    #[test]
+    fn silu_is_elementwise() {
+        let forward_in = tensor(&[2, 3], &[-2.0, -0.5, 0.0, 0.75, 1.5, 3.0]);
+        let mut forward_out = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.silu(&forward_in, &mut forward_out);
+
+        let mut reversed: Vec<f32> = forward_in.data.clone();
+        reversed.reverse();
+        let reversed_in = tensor(&[2, 3], &reversed);
+        let mut reversed_out = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.silu(&reversed_in, &mut reversed_out);
+
+        let mut expected = forward_out.data.clone();
+        expected.reverse();
+        assert_close(&reversed_out.data, &expected, DEFAULT_TOL);
+    }
+
+    #[test]
+    fn silu_overwrites_every_element_of_out() {
+        let t = tensor(&[2, 3], &[-2.0, -0.5, 0.0, 0.75, 1.5, 3.0]);
+        let mut expected = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.silu(&t, &mut expected);
+
+        let mut out = tensor(&[2, 3], &[999.0; 6]);
+        CpuBackend {}.silu(&t, &mut out);
+        assert_close(&out.data, &expected.data, DEFAULT_TOL);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed: t.is_valid()")]
+    fn silu_rejects_invalid_input() {
+        let t = tensor(&[2, 3], &[1.0; 5]); // 5 elements, shape needs 6
+        let mut out = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.silu(&t, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "dims: [3, 2]")]
+    fn silu_rejects_out_shape_mismatch() {
+        let t = tensor(&[2, 3], &[1.0; 6]);
+        let mut out = tensor(&[3, 2], &[0.0; 6]); // same element count, wrong shape
+        CpuBackend {}.silu(&t, &mut out);
     }
 }
