@@ -1,11 +1,19 @@
 use std::assert_eq;
 
 use crate::{Backend, RopeTable, get_index};
-use tensor::Tensor;
+use tensor::{Shape, Tensor};
 
 pub struct CpuBackend {}
 
 impl Backend for CpuBackend {
+    fn add(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) {
+        same_shape_assert(a, b);
+        same_shape_assert(a, out);
+        for (i, x) in a.data.iter().enumerate() {
+            out.data[i] = x + b.data[i];
+        }
+    }
+
     fn matmul(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) {
         matmul_assert(a, b, out);
         let m = a.shape.get_dim(0).unwrap_or_default();
@@ -16,6 +24,14 @@ impl Backend for CpuBackend {
                 let idx = get_index(out, i, j);
                 out.data[idx] = dot_product(get_row(a, i), get_row(b, j));
             }
+        }
+    }
+
+    fn hadamard_product(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) {
+        same_shape_assert(a, b);
+        same_shape_assert(a, out);
+        for (i, x) in a.data.iter().enumerate() {
+            out.data[i] = x * b.data[i];
         }
     }
 
@@ -87,9 +103,18 @@ impl Backend for CpuBackend {
     }
 
     fn silu(&self, t: &Tensor, out: &mut Tensor) {
-        silu_assert(t, out);
+        same_shape_assert(t, out);
         for (i, x) in t.data.iter().enumerate() {
             out.data[i] = x / (1.0 + (-1.0 * x).exp());
+        }
+    }
+
+    fn embedding_lookup(&self, ids: &[u32], embed: &Tensor, out: &mut Tensor) {
+        embedding_lookup_assert(ids, embed, out);
+        for (i, id) in ids.iter().enumerate() {
+            let ref_row = get_row(embed, *id as usize);
+            let out_row = get_mut_row(out, i);
+            out_row.copy_from_slice(ref_row);
         }
     }
 }
@@ -144,16 +169,40 @@ fn softmax_assert(t: &Tensor, out: &Tensor) {
     assert_eq!(2, t.shape.ndims());
 }
 
-fn silu_assert(t: &Tensor, out: &Tensor) {
+fn same_shape_assert(t: &Tensor, out: &Tensor) {
     assert!(t.is_valid());
     assert!(out.is_valid());
     assert_eq!(t.shape, out.shape);
 }
 
-fn get_row(t: &Tensor, i: usize) -> &[f32] {
+fn embedding_lookup_assert(ids: &[u32], embed: &Tensor, out: &Tensor) {
+    assert!(embed.is_valid());
+    assert!(out.is_valid());
+    assert_eq!(2, embed.shape.ndims());
+    assert_eq!(
+        Shape::new(&[ids.len(), embed.shape.get_dim(1).unwrap_or_default()]),
+        out.shape
+    );
+    assert!(
+        embed.shape.get_dim(0).unwrap_or_default()
+            > ids.iter().cloned().max().unwrap_or_default() as usize
+    );
+}
+
+fn get_row_idxs(t: &Tensor, i: usize) -> (usize, usize) {
     let start = get_index(t, i, 0);
     let end = start + t.shape.get_dim(1).unwrap_or_default();
+    (start, end)
+}
+
+fn get_row(t: &Tensor, i: usize) -> &[f32] {
+    let (start, end) = get_row_idxs(t, i);
     &t.data[start..end]
+}
+
+fn get_mut_row(t: &mut Tensor, i: usize) -> &mut [f32] {
+    let (start, end) = get_row_idxs(t, i);
+    &mut t.data[start..end]
 }
 
 fn dot_product(a: &[f32], b: &[f32]) -> f32 {
@@ -1061,5 +1110,360 @@ mod tests {
         let t = tensor(&[2, 3], &[1.0; 6]);
         let mut out = tensor(&[3, 2], &[0.0; 6]); // same element count, wrong shape
         CpuBackend {}.silu(&t, &mut out);
+    }
+
+    #[test]
+    fn add_valid_using_vector() {
+        let a = tensor(&[1, 3], &[1.0, -2.0, 0.5]);
+        let b = tensor(&[1, 3], &[0.25, 2.0, -1.5]);
+        let mut out = tensor(&[1, 3], &[0.0; 3]);
+        CpuBackend {}.add(&a, &b, &mut out);
+        assert_eq!(out.shape, Shape::new(&[1, 3]));
+        assert_close(&out.data, &[1.25, 0.0, -1.0], DEFAULT_TOL);
+    }
+
+    #[test]
+    fn add_valid_using_matrix() {
+        let a = tensor(
+            &[3, 4],
+            &[
+                0.0, 1.0, -1.0, 0.5, // row 0
+                2.5, -0.75, 4.0, -8.0, // row 1
+                100.0, -0.125, 3.25, 6.0, // row 2
+            ],
+        );
+        let b = tensor(
+            &[3, 4],
+            &[
+                0.0, -1.0, -2.0, 0.25, // row 0
+                -2.5, 0.75, 0.5, 8.0, // row 1
+                0.5, 0.125, -3.25, -12.0, // row 2
+            ],
+        );
+        let mut out = tensor(&[3, 4], &[0.0; 12]);
+        CpuBackend {}.add(&a, &b, &mut out);
+        assert_eq!(out.shape, Shape::new(&[3, 4]));
+        assert_close(
+            &out.data,
+            &[
+                0.0, 0.0, -3.0, 0.75, // row 0
+                0.0, 0.0, 4.5, 0.0, // row 1
+                100.5, 0.0, 0.0, -6.0, // row 2
+            ],
+            DEFAULT_TOL,
+        );
+    }
+
+    #[test]
+    fn add_is_commutative() {
+        let a = tensor(&[2, 3], &[1.0, -2.0, 0.5, 3.25, -0.125, 0.0]);
+        let b = tensor(&[2, 3], &[0.25, 2.0, -1.5, -3.25, 8.0, 4.0]);
+        let mut ab = tensor(&[2, 3], &[0.0; 6]);
+        let mut ba = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.add(&a, &b, &mut ab);
+        CpuBackend {}.add(&b, &a, &mut ba);
+        assert_close(&ab.data, &ba.data, DEFAULT_TOL);
+    }
+
+    /// Adding zeros must leave the input untouched.
+    #[test]
+    fn add_zero_is_identity() {
+        let a = tensor(&[2, 3], &[1.0, -2.0, 0.5, 3.25, -0.125, 0.0]);
+        let zeros = tensor(&[2, 3], &[0.0; 6]);
+        let mut out = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.add(&a, &zeros, &mut out);
+        assert_close(&out.data, &a.data, DEFAULT_TOL);
+    }
+
+    #[test]
+    fn add_overwrites_every_element_of_out() {
+        let a = tensor(&[2, 3], &[1.0, -2.0, 0.5, 3.25, -0.125, 0.0]);
+        let b = tensor(&[2, 3], &[0.25, 2.0, -1.5, -3.25, 8.0, 4.0]);
+        let mut out = tensor(&[2, 3], &[999.0; 6]);
+        CpuBackend {}.add(&a, &b, &mut out);
+        assert_close(&out.data, &[1.25, 0.0, -1.0, 0.0, 7.875, 4.0], DEFAULT_TOL);
+    }
+
+    #[test]
+    #[should_panic(expected = "dims: [3, 2]")]
+    fn add_rejects_mismatched_input_shapes() {
+        let a = tensor(&[2, 3], &[1.0; 6]);
+        let b = tensor(&[3, 2], &[1.0; 6]); // same element count, wrong shape
+        let mut out = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.add(&a, &b, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "dims: [6, 1]")]
+    fn add_rejects_out_shape_mismatch() {
+        let a = tensor(&[2, 3], &[1.0; 6]);
+        let b = tensor(&[2, 3], &[1.0; 6]);
+        let mut out = tensor(&[6, 1], &[0.0; 6]);
+        CpuBackend {}.add(&a, &b, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed: t.is_valid()")]
+    fn add_rejects_invalid_input() {
+        let a = tensor(&[2, 3], &[1.0; 5]); // 5 elements, shape needs 6
+        let b = tensor(&[2, 3], &[1.0; 6]);
+        let mut out = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.add(&a, &b, &mut out);
+    }
+
+    #[test]
+    fn hadamard_product_valid_using_vector() {
+        let a = tensor(&[1, 3], &[2.0, -3.0, 0.5]);
+        let b = tensor(&[1, 3], &[0.25, 0.5, -4.0]);
+        let mut out = tensor(&[1, 3], &[0.0; 3]);
+        CpuBackend {}.hadamard_product(&a, &b, &mut out);
+        assert_eq!(out.shape, Shape::new(&[1, 3]));
+        assert_close(&out.data, &[0.5, -1.5, -2.0], DEFAULT_TOL);
+    }
+
+    #[test]
+    fn hadamard_product_valid_using_matrix() {
+        let a = tensor(
+            &[3, 4],
+            &[
+                0.0, 1.0, -1.0, 0.5, // row 0
+                2.5, -0.75, 4.0, -8.0, // row 1
+                1.5, -0.125, 3.25, 6.0, // row 2
+            ],
+        );
+        let b = tensor(
+            &[3, 4],
+            &[
+                3.0, -1.0, -2.0, 0.25, // row 0
+                -2.0, 4.0, 0.5, 0.125, // row 1
+                0.5, 8.0, -4.0, -0.5, // row 2
+            ],
+        );
+        let mut out = tensor(&[3, 4], &[0.0; 12]);
+        CpuBackend {}.hadamard_product(&a, &b, &mut out);
+        assert_eq!(out.shape, Shape::new(&[3, 4]));
+        assert_close(
+            &out.data,
+            &[
+                0.0, -1.0, 2.0, 0.125, // row 0
+                -5.0, -3.0, 2.0, -1.0, // row 1
+                0.75, -1.0, -13.0, -3.0, // row 2
+            ],
+            DEFAULT_TOL,
+        );
+    }
+
+    #[test]
+    fn hadamard_product_is_commutative() {
+        let a = tensor(&[2, 3], &[2.0, -3.0, 0.5, 1.25, -0.5, 0.0]);
+        let b = tensor(&[2, 3], &[0.25, 0.5, -4.0, 8.0, -2.0, 3.0]);
+        let mut ab = tensor(&[2, 3], &[0.0; 6]);
+        let mut ba = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.hadamard_product(&a, &b, &mut ab);
+        CpuBackend {}.hadamard_product(&b, &a, &mut ba);
+        assert_close(&ab.data, &ba.data, DEFAULT_TOL);
+    }
+
+    /// Multiplying by ones leaves the input untouched; multiplying by zeros
+    /// erases it. Together these pin that it is elementwise and not a matrix
+    /// product, which would not satisfy either for non-square shapes.
+    #[test]
+    fn hadamard_product_ones_and_zeros() {
+        let a = tensor(&[2, 3], &[2.0, -3.0, 0.5, 1.25, -0.5, 0.0]);
+        let mut out = tensor(&[2, 3], &[0.0; 6]);
+
+        CpuBackend {}.hadamard_product(&a, &tensor(&[2, 3], &[1.0; 6]), &mut out);
+        assert_close(&out.data, &a.data, DEFAULT_TOL);
+
+        CpuBackend {}.hadamard_product(&a, &tensor(&[2, 3], &[0.0; 6]), &mut out);
+        assert_close(&out.data, &[0.0; 6], DEFAULT_TOL);
+    }
+
+    /// Output `i` must depend only on input `i`, so reversing both inputs must
+    /// reverse the output. Catches an index mistake that symmetric data hides.
+    #[test]
+    fn hadamard_product_is_elementwise() {
+        let a = tensor(&[2, 3], &[2.0, -3.0, 0.5, 1.25, -0.5, 4.0]);
+        let b = tensor(&[2, 3], &[0.25, 0.5, -4.0, 8.0, -2.0, 3.0]);
+        let mut forward = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.hadamard_product(&a, &b, &mut forward);
+
+        let rev = |t: &Tensor| {
+            let mut d = t.data.clone();
+            d.reverse();
+            tensor(&[2, 3], &d)
+        };
+        let mut reversed = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.hadamard_product(&rev(&a), &rev(&b), &mut reversed);
+
+        let mut expected = forward.data.clone();
+        expected.reverse();
+        assert_close(&reversed.data, &expected, DEFAULT_TOL);
+    }
+
+    #[test]
+    fn hadamard_product_overwrites_every_element_of_out() {
+        let a = tensor(&[2, 3], &[2.0, -3.0, 0.5, 1.25, -0.5, 0.0]);
+        let b = tensor(&[2, 3], &[0.25, 0.5, -4.0, 8.0, -2.0, 3.0]);
+        let mut out = tensor(&[2, 3], &[999.0; 6]);
+        CpuBackend {}.hadamard_product(&a, &b, &mut out);
+        assert_close(&out.data, &[0.5, -1.5, -2.0, 10.0, 1.0, 0.0], DEFAULT_TOL);
+    }
+
+    #[test]
+    #[should_panic(expected = "dims: [3, 2]")]
+    fn hadamard_product_rejects_mismatched_input_shapes() {
+        let a = tensor(&[2, 3], &[1.0; 6]);
+        let b = tensor(&[3, 2], &[1.0; 6]);
+        let mut out = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.hadamard_product(&a, &b, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "dims: [6, 1]")]
+    fn hadamard_product_rejects_out_shape_mismatch() {
+        let a = tensor(&[2, 3], &[1.0; 6]);
+        let b = tensor(&[2, 3], &[1.0; 6]);
+        let mut out = tensor(&[6, 1], &[0.0; 6]);
+        CpuBackend {}.hadamard_product(&a, &b, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed: t.is_valid()")]
+    fn hadamard_product_rejects_invalid_input() {
+        let a = tensor(&[2, 3], &[1.0; 5]);
+        let b = tensor(&[2, 3], &[1.0; 6]);
+        let mut out = tensor(&[2, 3], &[0.0; 6]);
+        CpuBackend {}.hadamard_product(&a, &b, &mut out);
+    }
+
+    /// embed[i] = [i*10, i*10+1, i*10+2], so each row is recognizable.
+    fn embed_5x3() -> Tensor {
+        tensor(
+            &[5, 3],
+            &[
+                0.0, 1.0, 2.0, // id 0
+                10.0, 11.0, 12.0, // id 1
+                20.0, 21.0, 22.0, // id 2
+                30.0, 31.0, 32.0, // id 3
+                40.0, 41.0, 42.0, // id 4
+            ],
+        )
+    }
+
+    /// Out-of-order ids with a repeat. Sequential ids would hide a bug that
+    /// ignores `ids` and uses the output position instead.
+    #[test]
+    fn embedding_lookup_gathers_rows() {
+        let embed = embed_5x3();
+        let ids = [3u32, 0, 3, 4];
+        let mut out = tensor(&[4, 3], &[0.0; 12]);
+        CpuBackend {}.embedding_lookup(&ids, &embed, &mut out);
+        assert_close(
+            &out.data,
+            &[
+                30.0, 31.0, 32.0, // id 3
+                0.0, 1.0, 2.0, // id 0
+                30.0, 31.0, 32.0, // id 3 again
+                40.0, 41.0, 42.0, // id 4
+            ],
+            DEFAULT_TOL,
+        );
+    }
+
+    /// Token ids range over the vocabulary, not the hidden size. The toy has
+    /// vocab 1024 and hidden 64, and its real prompt starts with ids
+    /// [392, 425, 672, ...] — all far larger than hidden.
+    #[test]
+    fn embedding_lookup_accepts_ids_larger_than_hidden_size() {
+        let data: Vec<f32> = (0..400).map(|i| i as f32).collect();
+        let embed = tensor(&[100, 4], &data); // vocab 100, hidden 4
+        let ids = [99u32, 64, 0];
+        let mut out = tensor(&[3, 4], &[0.0; 12]);
+        CpuBackend {}.embedding_lookup(&ids, &embed, &mut out);
+        assert_close(
+            &out.data,
+            &[
+                396.0, 397.0, 398.0, 399.0, // id 99
+                256.0, 257.0, 258.0, 259.0, // id 64
+                0.0, 1.0, 2.0, 3.0, // id 0
+            ],
+            DEFAULT_TOL,
+        );
+    }
+
+    /// The decode shape: one token at a time.
+    #[test]
+    fn embedding_lookup_single_id() {
+        let embed = embed_5x3();
+        let mut out = tensor(&[1, 3], &[0.0; 3]);
+        CpuBackend {}.embedding_lookup(&[2u32], &embed, &mut out);
+        assert_close(&out.data, &[20.0, 21.0, 22.0], DEFAULT_TOL);
+    }
+
+    /// A repeated token copies the same row again; no deduplication.
+    #[test]
+    fn embedding_lookup_repeats_rows() {
+        let embed = embed_5x3();
+        let mut out = tensor(&[3, 3], &[0.0; 9]);
+        CpuBackend {}.embedding_lookup(&[2u32, 2, 2], &embed, &mut out);
+        assert_close(
+            &out.data,
+            &[20.0, 21.0, 22.0, 20.0, 21.0, 22.0, 20.0, 21.0, 22.0],
+            DEFAULT_TOL,
+        );
+    }
+
+    #[test]
+    fn embedding_lookup_empty_ids() {
+        let embed = embed_5x3();
+        let mut out = tensor(&[0, 3], &[]);
+        CpuBackend {}.embedding_lookup(&[], &embed, &mut out);
+        assert!(out.data.is_empty());
+    }
+
+    #[test]
+    fn embedding_lookup_overwrites_every_element_of_out() {
+        let embed = embed_5x3();
+        let mut out = tensor(&[2, 3], &[999.0; 6]);
+        CpuBackend {}.embedding_lookup(&[1u32, 0], &embed, &mut out);
+        assert_close(&out.data, &[10.0, 11.0, 12.0, 0.0, 1.0, 2.0], DEFAULT_TOL);
+    }
+
+    /// An id at or past `vocab_size` means a tokenizer/vocab mismatch and must
+    /// be rejected. `expected` is left off because the current assert compares
+    /// against the wrong dimension; once it checks `embed.dim(0)`, pin the
+    /// message so this test proves which assert fired.
+    #[test]
+    #[should_panic]
+    fn embedding_lookup_rejects_id_past_vocab() {
+        let data: Vec<f32> = (0..40).map(|i| i as f32).collect();
+        let embed = tensor(&[5, 8], &data); // vocab 5, hidden 8
+        let mut out = tensor(&[1, 8], &[0.0; 8]);
+        CpuBackend {}.embedding_lookup(&[5u32], &embed, &mut out); // ids are 0..=4
+    }
+
+    #[test]
+    #[should_panic(expected = "dims: [3, 2]")]
+    fn embedding_lookup_rejects_out_shape_mismatch() {
+        let embed = embed_5x3();
+        let mut out = tensor(&[3, 2], &[0.0; 6]); // should be [2, 3]
+        CpuBackend {}.embedding_lookup(&[1u32, 0], &embed, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "right: 1")]
+    fn embedding_lookup_rejects_non_2d_embed() {
+        let embed = tensor(&[6], &[0.0; 6]);
+        let mut out = tensor(&[1, 3], &[0.0; 3]);
+        CpuBackend {}.embedding_lookup(&[0u32], &embed, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed: embed.is_valid()")]
+    fn embedding_lookup_rejects_invalid_embed() {
+        let embed = tensor(&[5, 3], &[0.0; 14]); // 14 elements, shape needs 15
+        let mut out = tensor(&[1, 3], &[0.0; 3]);
+        CpuBackend {}.embedding_lookup(&[0u32], &embed, &mut out);
     }
 }

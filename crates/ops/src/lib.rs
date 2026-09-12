@@ -44,6 +44,9 @@ impl RopeTable {
 }
 
 pub trait Backend {
+    /// Adds two same-shaped tensors together, and provides the results to `out`.
+    fn add(&self, a: &Tensor, b: &Tensor, out: &mut Tensor);
+
     /// Performs a 2D matrix multiplication, and provides the results to `out`.
     ///
     /// Note that this multiplication is accomplished by performing row-row dot
@@ -51,6 +54,10 @@ pub trait Backend {
     /// Instead, you must first transpose B such that the number of columns
     /// match.
     fn matmul(&self, a: &Tensor, b: &Tensor, out: &mut Tensor);
+
+    /// Calculates the Hadamard product of two tensors, and provides the results
+    /// to `out`.
+    fn hadamard_product(&self, a: &Tensor, b: &Tensor, out: &mut Tensor);
 
     /// Normalizes each row of the input tensor by root-mean-square and provides
     /// the results to `out`.
@@ -81,8 +88,14 @@ pub trait Backend {
     /// This method applies softmax row-wise.
     fn softmax(&self, t: &Tensor, out: &mut Tensor);
 
-    // Calculates Sigmoid Linear Unit (SiLU), and provides the results to `out`.
+    /// Calculates Sigmoid Linear Unit (SiLU), and provides the results to `out`.
     fn silu(&self, t: &Tensor, out: &mut Tensor);
+
+    /// Performs an embedding lookup and provides the results to `out`.
+    ///
+    /// `ids` are the embeddings, and `embed` is the lookup table. All IDs
+    /// must be bounded by the number of rows in the lookup table.
+    fn embedding_lookup(&self, ids: &[u32], embed: &Tensor, out: &mut Tensor);
 }
 
 // Helper functions
