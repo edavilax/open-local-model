@@ -1,10 +1,10 @@
-use tensor::{Shape, Tensor};
+use tensor::{Matrix, Tensor, Vector};
 
 pub mod cpubackend;
 
 pub struct RopeTable {
-    cos: Tensor,
-    sin: Tensor,
+    cos: Matrix,
+    sin: Matrix,
 }
 
 impl RopeTable {
@@ -15,16 +15,8 @@ impl RopeTable {
         assert!(theta > 0.0);
         let m = max_seq;
         let n = head_dim / 2;
-        let out_shape = Shape::new(&[m, n]);
-        let num_elems = out_shape.num_elems();
-        let mut cos = Tensor {
-            shape: out_shape.clone(),
-            data: vec![0.0; num_elems],
-        };
-        let mut sin = Tensor {
-            shape: out_shape,
-            data: vec![0.0; num_elems],
-        };
+        let mut cos = Matrix::zeros([m, n]);
+        let mut sin = Matrix::zeros([m, n]);
         // Calculate frequencies.
         let mut freqs: Vec<f32> = Vec::new();
         for i in 0..n {
@@ -33,11 +25,10 @@ impl RopeTable {
         // Calculate cosines/sines for each step.
         for i in 0..m {
             let step = i as f32;
-            for (j, freq) in freqs.iter().enumerate() {
-                let idx = get_index(&cos, i, j);
-                cos.data[idx] = (step * freq).cos();
-                sin.data[idx] = (step * freq).sin();
-            }
+            let cos_row: Vec<f32> = freqs.iter().map(|x| (x * step).cos()).collect();
+            cos.mut_row(i).copy_from_slice(&cos_row);
+            let sin_row: Vec<f32> = freqs.iter().map(|x| (x * step).sin()).collect();
+            sin.mut_row(i).copy_from_slice(&sin_row);
         }
         RopeTable { cos, sin }
     }
@@ -45,7 +36,7 @@ impl RopeTable {
 
 pub trait Backend {
     /// Adds two same-shaped tensors together, and provides the results to `out`.
-    fn add(&self, a: &Tensor, b: &Tensor, out: &mut Tensor);
+    fn add<const R: usize>(&self, a: &Tensor<R>, b: &Tensor<R>, out: &mut Tensor<R>);
 
     /// Performs a 2D matrix multiplication, and provides the results to `out`.
     ///
@@ -53,11 +44,11 @@ pub trait Backend {
     /// products. So a normal A\[n,k\] * B\[k,m\] will not work with this function.
     /// Instead, you must first transpose B such that the number of columns
     /// match.
-    fn matmul(&self, a: &Tensor, b: &Tensor, out: &mut Tensor);
+    fn matmul(&self, a: &Matrix, b: &Matrix, out: &mut Matrix);
 
     /// Calculates the Hadamard product of two tensors, and provides the results
     /// to `out`.
-    fn hadamard_product(&self, a: &Tensor, b: &Tensor, out: &mut Tensor);
+    fn hadamard_product<const R: usize>(&self, a: &Tensor<R>, b: &Tensor<R>, out: &mut Tensor<R>);
 
     /// Normalizes each row of the input tensor by root-mean-square and provides
     /// the results to `out`.
@@ -67,9 +58,9 @@ pub trait Backend {
     /// the final norm calculation.
     ///
     /// `eps` is an additive factor to prevent divide by zero.
-    fn rmsnorm(&self, t: &Tensor, w: &Tensor, eps: f32, out: &mut Tensor);
+    fn rmsnorm(&self, t: &Matrix, w: &Vector, eps: f32, out: &mut Matrix);
 
-    /// Calculates the RoPE (Rotary Position Embeddings) of the input tensor,
+    /// Calculates the RoPE (Rotary Position Embeddings) of the input matrix,
     /// and provides the result to `out`.
     ///
     /// This method implements the rotate-half variant of RoPE for optimal
@@ -80,47 +71,42 @@ pub trait Backend {
     ///
     /// `m_start` is the starting index for the token offset. An input tensor of
     /// N row will provide output for token positions [m_start, m_start + N).
-    fn rope(&self, t: &Tensor, table: &RopeTable, m_start: usize, out: &mut Tensor);
+    fn rope(&self, t: &Matrix, table: &RopeTable, m_start: usize, out: &mut Matrix);
 
     /// Calculates the softmax of the input tensor, and provides the result to
     /// `out`.
     ///
     /// This method applies softmax row-wise.
-    fn softmax(&self, t: &Tensor, out: &mut Tensor);
+    fn softmax(&self, t: &Matrix, out: &mut Matrix);
 
     /// Calculates Sigmoid Linear Unit (SiLU), and provides the results to `out`.
-    fn silu(&self, t: &Tensor, out: &mut Tensor);
+    fn silu<const R: usize>(&self, t: &Tensor<R>, out: &mut Tensor<R>);
 
     /// Performs an embedding lookup and provides the results to `out`.
     ///
     /// `ids` are the embeddings, and `embed` is the lookup table. All IDs
     /// must be bounded by the number of rows in the lookup table.
-    fn embedding_lookup(&self, ids: &[u32], embed: &Tensor, out: &mut Tensor);
-}
-
-// Helper functions
-
-fn get_index(t: &Tensor, i: usize, j: usize) -> usize {
-    let m = t.shape.get_dim(1).unwrap_or_default();
-    m * i + j
+    fn embedding_lookup(&self, ids: &[u32], embed: &Matrix, out: &mut Matrix);
 }
 
 #[cfg(test)]
 mod test {
-    use std::{assert_eq, vec};
-
     use testutil::{DEFAULT_TOL, assert_close};
 
     use super::*;
 
+    fn data<const R: usize>(t: &Tensor<R>) -> Vec<f32> {
+        t.data_iter().copied().collect()
+    }
+
     #[test]
     fn rope_table() {
         let table = RopeTable::new(8, 7, 10000.0);
-        let expected_shape = Shape::new(&[7, 4]);
+        let expected_shape = [7, 4];
 
-        let expected_cos = Tensor {
-            shape: expected_shape.clone(),
-            data: vec![
+        let expected_cos = Matrix::new(
+            expected_shape,
+            vec![
                 1.0,
                 1.0,
                 1.0,
@@ -150,17 +136,14 @@ mod test {
                 0.99820054,
                 0.999982, // m = 6
             ],
-        };
-        assert_eq!(table.cos.shape, expected_cos.shape);
-        assert_close(
-            table.cos.data.as_slice(),
-            expected_cos.data.as_slice(),
-            DEFAULT_TOL,
-        );
+        )
+        .unwrap();
+        assert_eq!(table.cos.shape(), expected_cos.shape());
+        assert_close(&data(&table.cos), &data(&expected_cos), DEFAULT_TOL);
 
-        let expected_sin = Tensor {
-            shape: expected_shape.clone(),
-            data: vec![
+        let expected_sin = Matrix::new(
+            expected_shape,
+            vec![
                 0.0,
                 0.0,
                 0.0,
@@ -190,13 +173,10 @@ mod test {
                 0.059964005,
                 0.005999964, // m = 6
             ],
-        };
-        assert_eq!(table.sin.shape, expected_sin.shape);
-        assert_close(
-            table.sin.data.as_slice(),
-            expected_sin.data.as_slice(),
-            DEFAULT_TOL,
-        );
+        )
+        .unwrap();
+        assert_eq!(table.sin.shape(), expected_sin.shape());
+        assert_close(&data(&table.sin), &data(&expected_sin), DEFAULT_TOL);
     }
 
     #[test]
@@ -210,12 +190,11 @@ mod test {
     #[test]
     fn rope_table_entries_lie_on_unit_circle() {
         let table = RopeTable::new(16, 64, 10000.0);
-        assert_eq!(table.cos.shape, table.sin.shape);
+        assert_eq!(table.cos.shape(), table.sin.shape());
         let norms: Vec<f32> = table
             .cos
-            .data
-            .iter()
-            .zip(&table.sin.data)
+            .data_iter()
+            .zip(table.sin.data_iter())
             .map(|(c, s)| c * c + s * s)
             .collect();
         assert_close(&norms, &vec![1.0; norms.len()], DEFAULT_TOL);
@@ -230,8 +209,9 @@ mod test {
         let (head_dim, theta) = (8, 1_000_000.0_f32);
         let table = RopeTable::new(head_dim, 2, theta);
         let angle = |j: usize| {
-            let idx = get_index(&table.cos, 1, j);
-            table.sin.data[idx].atan2(table.cos.data[idx])
+            let s = table.sin.get(&[1, j]).unwrap();
+            let c = table.cos.get(&[1, j]).unwrap();
+            s.atan2(c)
         };
         let ratio = theta.powf(-2.0 / head_dim as f32);
         assert_close(&[angle(0)], &[1.0], DEFAULT_TOL);
