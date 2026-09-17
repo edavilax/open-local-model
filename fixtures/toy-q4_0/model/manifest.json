@@ -16,12 +16,12 @@
   },
   "metadata": {
     "context_window": 512,
-    "name": "toy-f32"
+    "name": "toy-q4_0"
   },
   "model_family": "transformer-decoder",
   "tensors": {
     "embed_tokens": {
-      "dtype": "f32",
+      "dtype": "f16",
       "shape": [
         1024,
         64
@@ -40,14 +40,14 @@
       ]
     },
     "layers.0.attn.k_proj": {
-      "dtype": "f32",
+      "dtype": "q4_0",
       "shape": [
         32,
         64
       ]
     },
     "layers.0.attn.o_proj": {
-      "dtype": "f32",
+      "dtype": "q4_0",
       "shape": [
         64,
         64
@@ -60,7 +60,7 @@
       ]
     },
     "layers.0.attn.q_proj": {
-      "dtype": "f32",
+      "dtype": "q4_0",
       "shape": [
         64,
         64
@@ -73,7 +73,7 @@
       ]
     },
     "layers.0.attn.v_proj": {
-      "dtype": "f32",
+      "dtype": "q4_0",
       "shape": [
         32,
         64
@@ -86,21 +86,21 @@
       ]
     },
     "layers.0.mlp.down_proj": {
-      "dtype": "f32",
+      "dtype": "q4_0",
       "shape": [
         64,
         128
       ]
     },
     "layers.0.mlp.gate_proj": {
-      "dtype": "f32",
+      "dtype": "q4_0",
       "shape": [
         128,
         64
       ]
     },
     "layers.0.mlp.up_proj": {
-      "dtype": "f32",
+      "dtype": "q4_0",
       "shape": [
         128,
         64
@@ -119,14 +119,14 @@
       ]
     },
     "layers.1.attn.k_proj": {
-      "dtype": "f32",
+      "dtype": "q4_0",
       "shape": [
         32,
         64
       ]
     },
     "layers.1.attn.o_proj": {
-      "dtype": "f32",
+      "dtype": "q4_0",
       "shape": [
         64,
         64
@@ -139,7 +139,7 @@
       ]
     },
     "layers.1.attn.q_proj": {
-      "dtype": "f32",
+      "dtype": "q4_0",
       "shape": [
         64,
         64
@@ -152,7 +152,7 @@
       ]
     },
     "layers.1.attn.v_proj": {
-      "dtype": "f32",
+      "dtype": "q4_0",
       "shape": [
         32,
         64
@@ -165,21 +165,21 @@
       ]
     },
     "layers.1.mlp.down_proj": {
-      "dtype": "f32",
+      "dtype": "q4_0",
       "shape": [
         64,
         128
       ]
     },
     "layers.1.mlp.gate_proj": {
-      "dtype": "f32",
+      "dtype": "q4_0",
       "shape": [
         128,
         64
       ]
     },
     "layers.1.mlp.up_proj": {
-      "dtype": "f32",
+      "dtype": "q4_0",
       "shape": [
         128,
         64
