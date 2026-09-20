@@ -15,8 +15,8 @@ impl RopeTable {
         assert!(theta > 0.0);
         let m = max_seq;
         let n = head_dim / 2;
-        let mut cos = Matrix::zeros([m, n]);
-        let mut sin = Matrix::zeros([m, n]);
+        let mut cos = Matrix::zeros_f32([m, n]);
+        let mut sin = Matrix::zeros_f32([m, n]);
         // Calculate frequencies.
         let mut freqs: Vec<f32> = Vec::new();
         for i in 0..n {
@@ -26,9 +26,9 @@ impl RopeTable {
         for i in 0..m {
             let step = i as f32;
             let cos_row: Vec<f32> = freqs.iter().map(|x| (x * step).cos()).collect();
-            cos.mut_row(i).copy_from_slice(&cos_row);
+            cos.row_f32_mut(i).unwrap().copy_from_slice(&cos_row);
             let sin_row: Vec<f32> = freqs.iter().map(|x| (x * step).sin()).collect();
-            sin.mut_row(i).copy_from_slice(&sin_row);
+            sin.row_f32_mut(i).unwrap().copy_from_slice(&sin_row);
         }
         RopeTable { cos, sin }
     }
@@ -36,7 +36,12 @@ impl RopeTable {
 
 pub trait Backend {
     /// Adds two same-shaped tensors together, and provides the results to `out`.
-    fn add<const R: usize>(&self, a: &Tensor<R>, b: &Tensor<R>, out: &mut Tensor<R>);
+    fn add<const R: usize>(
+        &self,
+        a: &Tensor<R>,
+        b: &Tensor<R>,
+        out: &mut Tensor<R>,
+    ) -> Result<(), OpsError>;
 
     /// Performs a 2D matrix multiplication, and provides the results to `out`.
     ///
@@ -44,11 +49,16 @@ pub trait Backend {
     /// products. So a normal A\[n,k\] * B\[k,m\] will not work with this function.
     /// Instead, you must first transpose B such that the number of columns
     /// match.
-    fn matmul(&self, a: &Matrix, b: &Matrix, out: &mut Matrix);
+    fn matmul(&self, a: &Matrix, b: &Matrix, out: &mut Matrix) -> Result<(), OpsError>;
 
     /// Calculates the Hadamard product of two tensors, and provides the results
     /// to `out`.
-    fn hadamard_product<const R: usize>(&self, a: &Tensor<R>, b: &Tensor<R>, out: &mut Tensor<R>);
+    fn hadamard_product<const R: usize>(
+        &self,
+        a: &Tensor<R>,
+        b: &Tensor<R>,
+        out: &mut Tensor<R>,
+    ) -> Result<(), OpsError>;
 
     /// Normalizes each row of the input tensor by root-mean-square and provides
     /// the results to `out`.
@@ -58,7 +68,7 @@ pub trait Backend {
     /// the final norm calculation.
     ///
     /// `eps` is an additive factor to prevent divide by zero.
-    fn rmsnorm(&self, t: &Matrix, w: &Vector, eps: f32, out: &mut Matrix);
+    fn rmsnorm(&self, t: &Matrix, w: &Vector, eps: f32, out: &mut Matrix) -> Result<(), OpsError>;
 
     /// Calculates the RoPE (Rotary Position Embeddings) of the input matrix,
     /// and provides the result to `out`.
@@ -71,22 +81,45 @@ pub trait Backend {
     ///
     /// `m_start` is the starting index for the token offset. An input tensor of
     /// N row will provide output for token positions [m_start, m_start + N).
-    fn rope(&self, t: &Matrix, table: &RopeTable, m_start: usize, out: &mut Matrix);
+    fn rope(
+        &self,
+        t: &Matrix,
+        table: &RopeTable,
+        m_start: usize,
+        out: &mut Matrix,
+    ) -> Result<(), OpsError>;
 
     /// Calculates the softmax of the input tensor, and provides the result to
     /// `out`.
     ///
     /// This method applies softmax row-wise.
-    fn softmax(&self, t: &Matrix, out: &mut Matrix);
+    fn softmax(&self, t: &Matrix, out: &mut Matrix) -> Result<(), OpsError>;
 
     /// Calculates Sigmoid Linear Unit (SiLU), and provides the results to `out`.
-    fn silu<const R: usize>(&self, t: &Tensor<R>, out: &mut Tensor<R>);
+    fn silu<const R: usize>(&self, t: &Tensor<R>, out: &mut Tensor<R>) -> Result<(), OpsError>;
 
     /// Performs an embedding lookup and provides the results to `out`.
     ///
     /// `ids` are the embeddings, and `embed` is the lookup table. All IDs
     /// must be bounded by the number of rows in the lookup table.
-    fn embedding_lookup(&self, ids: &[u32], embed: &Matrix, out: &mut Matrix);
+    fn embedding_lookup(
+        &self,
+        ids: &[u32],
+        embed: &Matrix,
+        out: &mut Matrix,
+    ) -> Result<(), OpsError>;
+}
+
+#[derive(Debug)]
+pub enum OpsError {
+    TensorError(tensor::TensorError),
+    ShapeMismatch,
+}
+
+impl From<tensor::TensorError> for OpsError {
+    fn from(value: tensor::TensorError) -> Self {
+        OpsError::TensorError(value)
+    }
 }
 
 #[cfg(test)]
@@ -96,7 +129,7 @@ mod test {
     use super::*;
 
     fn data<const R: usize>(t: &Tensor<R>) -> Vec<f32> {
-        t.data_iter().copied().collect()
+        t.as_f32().unwrap().to_vec()
     }
 
     #[test]
@@ -104,79 +137,71 @@ mod test {
         let table = RopeTable::new(8, 7, 10000.0);
         let expected_shape = [7, 4];
 
-        let expected_cos = Matrix::new(
-            expected_shape,
-            vec![
-                1.0,
-                1.0,
-                1.0,
-                1.0, // m = 0
-                0.5403023,
-                0.9950042,
-                0.99995,
-                0.9999995, // m = 1
-                -0.41614684,
-                0.9800666,
-                0.9998,
-                0.999998, // m = 2
-                -0.9899925,
-                0.9553365,
-                0.99955004,
-                0.9999955, // m = 3
-                -0.6536436,
-                0.921061,
-                0.9992001,
-                0.999992, // m = 4
-                0.2836622,
-                0.87758255,
-                0.99875027,
-                0.9999875, // m = 5
-                0.96017027,
-                0.8253356,
-                0.99820054,
-                0.999982, // m = 6
-            ],
-        )
-        .unwrap();
-        assert_eq!(table.cos.shape(), expected_cos.shape());
-        assert_close(&data(&table.cos), &data(&expected_cos), DEFAULT_TOL);
+        let expected_cos = [
+            1.0,
+            1.0,
+            1.0,
+            1.0, // m = 0
+            0.5403023,
+            0.9950042,
+            0.99995,
+            0.9999995, // m = 1
+            -0.41614684,
+            0.9800666,
+            0.9998,
+            0.999998, // m = 2
+            -0.9899925,
+            0.9553365,
+            0.99955004,
+            0.9999955, // m = 3
+            -0.6536436,
+            0.921061,
+            0.9992001,
+            0.999992, // m = 4
+            0.2836622,
+            0.87758255,
+            0.99875027,
+            0.9999875, // m = 5
+            0.96017027,
+            0.8253356,
+            0.99820054,
+            0.999982, // m = 6
+        ];
+        assert_eq!(table.cos.shape(), &expected_shape);
+        assert_close(&data(&table.cos), &expected_cos, DEFAULT_TOL);
 
-        let expected_sin = Matrix::new(
-            expected_shape,
-            vec![
-                0.0,
-                0.0,
-                0.0,
-                0.0, // m = 0
-                0.84147096,
-                0.09983342,
-                0.009999833,
-                0.0009999999, // m = 1
-                0.9092974,
-                0.19866933,
-                0.019998666,
-                0.0019999987, // m = 2
-                0.14112,
-                0.29552022,
-                0.0299955,
-                0.0029999956, // m = 3
-                -0.7568025,
-                0.38941833,
-                0.039989334,
-                0.0039999895, // m = 4
-                -0.9589243,
-                0.47942555,
-                0.04997917,
-                0.0049999794, // m = 5
-                -0.2794155,
-                0.5646425,
-                0.059964005,
-                0.005999964, // m = 6
-            ],
-        )
-        .unwrap();
-        assert_eq!(table.sin.shape(), expected_sin.shape());
-        assert_close(&data(&table.sin), &data(&expected_sin), DEFAULT_TOL);
+        let expected_sin = [
+            0.0,
+            0.0,
+            0.0,
+            0.0, // m = 0
+            0.84147096,
+            0.09983342,
+            0.009999833,
+            0.0009999999, // m = 1
+            0.9092974,
+            0.19866933,
+            0.019998666,
+            0.0019999987, // m = 2
+            0.14112,
+            0.29552022,
+            0.0299955,
+            0.0029999956, // m = 3
+            -0.7568025,
+            0.38941833,
+            0.039989334,
+            0.0039999895, // m = 4
+            -0.9589243,
+            0.47942555,
+            0.04997917,
+            0.0049999794, // m = 5
+            -0.2794155,
+            0.5646425,
+            0.059964005,
+            0.005999964, // m = 6
+        ];
+        assert_eq!(table.sin.shape(), &expected_shape);
+        assert_close(&data(&table.sin), &expected_sin, DEFAULT_TOL);
     }
 
     #[test]
@@ -193,8 +218,10 @@ mod test {
         assert_eq!(table.cos.shape(), table.sin.shape());
         let norms: Vec<f32> = table
             .cos
-            .data_iter()
-            .zip(table.sin.data_iter())
+            .as_f32()
+            .unwrap()
+            .iter()
+            .zip(table.sin.as_f32().unwrap().iter())
             .map(|(c, s)| c * c + s * s)
             .collect();
         assert_close(&norms, &vec![1.0; norms.len()], DEFAULT_TOL);
@@ -209,8 +236,8 @@ mod test {
         let (head_dim, theta) = (8, 1_000_000.0_f32);
         let table = RopeTable::new(head_dim, 2, theta);
         let angle = |j: usize| {
-            let s = table.sin.get(&[1, j]).unwrap();
-            let c = table.cos.get(&[1, j]).unwrap();
+            let s = table.sin.row_f32(1).unwrap()[j];
+            let c = table.cos.row_f32(1).unwrap()[j];
             s.atan2(c)
         };
         let ratio = theta.powf(-2.0 / head_dim as f32);
