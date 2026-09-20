@@ -1,7 +1,9 @@
+pub mod mmap;
 pub mod numpy;
 
 use std::path::{Path, PathBuf};
 
+pub use mmap::{mmap_bytes, mmap_f32, mmap_f32_misaligned, mmap_file};
 use numpy::{Array, Element};
 
 /// Absolute tolerance for comparing f32 output.

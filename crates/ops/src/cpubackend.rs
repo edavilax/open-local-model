@@ -195,8 +195,8 @@ fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tensor::{Dtype, Storage};
-    use testutil::{DEFAULT_TOL, assert_close};
+    use tensor::{Dtype, Storage, TensorError};
+    use testutil::{DEFAULT_TOL, assert_close, mmap_f32};
 
     fn mat(shape: [usize; 2], data: &[f32]) -> Matrix {
         Matrix::new(shape, Dtype::F32, Storage::Heap(data.to_vec())).unwrap()
@@ -1387,5 +1387,139 @@ mod tests {
         let embed = embed_5x3();
         let mut out = Matrix::zeros_f32([3, 2]); // should be [2, 3]
         assert_shape_mismatch(CpuBackend {}.embedding_lookup(&[1u32, 0], &embed, &mut out));
+    }
+
+    // Mapped storage. Ops read through typed views, so where a tensor's bytes
+    // live must not change any result. Weights arrive mapped; activations and
+    // outputs stay on the heap. Each test reuses the expectations of its heap
+    // twin above.
+
+    /// A read-only matrix backed by a mapped temp file, as a weight would be.
+    fn mapped_mat(shape: [usize; 2], data: &[f32]) -> Matrix {
+        Matrix::new(shape, Dtype::F32, Storage::Mmap(mmap_f32(data))).unwrap()
+    }
+
+    fn mapped_vector(data: &[f32]) -> Vector {
+        Vector::new([data.len()], Dtype::F32, Storage::Mmap(mmap_f32(data))).unwrap()
+    }
+
+    /// Asserts that an op refused to write into read-only storage, and that
+    /// the tensor error arrived wrapped rather than flattened or dropped.
+    #[track_caller]
+    fn assert_read_only(result: Result<(), OpsError>) {
+        assert!(
+            matches!(result, Err(OpsError::TensorError(TensorError::ReadOnly))),
+            "expected Err(TensorError(ReadOnly)), got {result:?}"
+        );
+    }
+
+    /// The first real use in phase 2: token ids gathered out of the mapped
+    /// embedding table.
+    #[test]
+    fn embedding_lookup_reads_a_mapped_table() {
+        let embed = mapped_mat([5, 3], &data(&embed_5x3()));
+        let ids = [3u32, 0, 3, 4];
+        let mut out = Matrix::zeros_f32([4, 3]);
+        CpuBackend {}
+            .embedding_lookup(&ids, &embed, &mut out)
+            .unwrap();
+        assert_close(
+            &data(&out),
+            &[
+                30.0, 31.0, 32.0, // id 3
+                0.0, 1.0, 2.0, // id 0
+                30.0, 31.0, 32.0, // id 3 again
+                40.0, 41.0, 42.0, // id 4
+            ],
+            DEFAULT_TOL,
+        );
+    }
+
+    /// The projection shape: a heap activation times a mapped weight.
+    #[test]
+    fn matmul_reads_a_mapped_weight() {
+        let w = mapped_mat([4, 3], &data(&b_4x3()));
+        let mut out = Matrix::zeros_f32([2, 4]);
+        CpuBackend {}.matmul(&a_2x3(), &w, &mut out).unwrap();
+        assert_close(
+            &data(&out),
+            &[
+                6.0, -6.5, 6.0, 2.0, // row 0
+                1.0, 8.0, -10.5, 6.5, // row 1
+            ],
+            DEFAULT_TOL,
+        );
+    }
+
+    /// Both operands mapped. Inference never does this, but no result should
+    /// depend on either side living on the heap.
+    #[test]
+    fn matmul_reads_two_mapped_inputs() {
+        let a = mapped_mat([2, 3], &data(&a_2x3()));
+        let b = mapped_mat([4, 3], &data(&b_4x3()));
+        let mut out = Matrix::zeros_f32([2, 4]);
+        CpuBackend {}.matmul(&a, &b, &mut out).unwrap();
+        assert_close(
+            &data(&out),
+            &[6.0, -6.5, 6.0, 2.0, 1.0, 8.0, -10.5, 6.5],
+            DEFAULT_TOL,
+        );
+    }
+
+    #[test]
+    fn rmsnorm_reads_a_mapped_weight() {
+        let w = mapped_vector(&[1.0, 2.0, 0.5]);
+        let mut out = Matrix::zeros_f32([2, 3]);
+        CpuBackend {}.rmsnorm(&a_2x3(), &w, 1e-6, &mut out).unwrap();
+        assert_close(
+            &data(&out),
+            &[
+                1.0392302, -2.7712806, 0.0, // row 0
+                -0.2553769, 3.064523, -0.3830654, // row 1
+            ],
+            DEFAULT_TOL,
+        );
+    }
+
+    /// The bias shape: a heap activation plus a mapped f32 weight.
+    #[test]
+    fn add_reads_a_mapped_input() {
+        let a = vector(&[1.0, -2.0, 0.5]);
+        let b = mapped_vector(&[0.25, 2.0, -1.5]);
+        let mut out = Vector::zeros_f32([3]);
+        CpuBackend {}.add(&a, &b, &mut out).unwrap();
+        assert_close(&data(&out), &[1.25, 0.0, -1.0], DEFAULT_TOL);
+    }
+
+    // A mapped tensor as the output is a caller bug. It must come back as an
+    // error, never a write through a read-only page. One op per access
+    // pattern: whole-tensor view, hoisted slices, and per-row views.
+
+    #[test]
+    fn add_refuses_a_mapped_output() {
+        let a = vector(&[1.0, -2.0, 0.5]);
+        let b = vector(&[0.25, 2.0, -1.5]);
+        let mut out = mapped_vector(&[0.0; 3]);
+        assert_read_only(CpuBackend {}.add(&a, &b, &mut out));
+    }
+
+    #[test]
+    fn matmul_refuses_a_mapped_output() {
+        let mut out = mapped_mat([2, 4], &[0.0; 8]);
+        assert_read_only(CpuBackend {}.matmul(&a_2x3(), &b_4x3(), &mut out));
+    }
+
+    #[test]
+    fn embedding_lookup_refuses_a_mapped_output() {
+        let mut out = mapped_mat([2, 3], &[0.0; 6]);
+        assert_read_only(CpuBackend {}.embedding_lookup(&[1u32, 0], &embed_5x3(), &mut out));
+    }
+
+    /// Shape rules are checked before storage, so a call that is wrong both
+    /// ways reports the shape. Pins the order so error messages stay stable.
+    #[test]
+    fn shape_mismatch_is_reported_before_read_only() {
+        let mut out = mapped_mat([3, 2], &[0.0; 6]); // wrong shape and read-only
+        assert_shape_mismatch(CpuBackend {}.softmax(&a_2x3(), &mut out));
     }
 }
