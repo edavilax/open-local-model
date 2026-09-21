@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 memmap2 = "0.9.11"
 serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0.20"
 
 [dev-dependencies]
 testutil = { workspace = true }

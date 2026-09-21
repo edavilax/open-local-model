@@ -1,86 +1,87 @@
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
+use std::error::Error;
 
 use tensor::Dtype;
 
 use crate::OlmError;
 
-pub fn get_manifest(json: &str) -> Result<Manifest, OlmError> {
-    let manifest: Manifest =
-        serde_json::from_str(json).map_err(|e| OlmError::InvalidJson(e.to_string()))?;
+pub fn get_manifest(json: &str) -> Result<Manifest, Box<dyn Error>> {
+    let manifest: Manifest = serde_json::from_str(json)?;
     if manifest.format_version != 1 {
-        return Err(OlmError::FieldValidation(String::from(
-            "Only support format version 1",
-        )));
+        return Err(
+            OlmError::FieldValidation(String::from("Only support format version 1")).into(),
+        );
     }
     if manifest.model_family != "transformer-decoder" {
         return Err(OlmError::FieldValidation(String::from(
             "Only support model type of transformer-decoder",
-        )));
+        ))
+        .into());
     }
     if manifest.tokenizer.eos_token_ids.len() == 0 {
-        return Err(OlmError::FieldValidation(String::from(
-            "Must have EOS token IDs",
-        )));
+        return Err(OlmError::FieldValidation(String::from("Must have EOS token IDs")).into());
     }
     if manifest.hyperparameters.hidden_size == 0 {
-        return Err(OlmError::FieldValidation(String::from(
-            "Must have non-zero hidden size",
-        )));
+        return Err(
+            OlmError::FieldValidation(String::from("Must have non-zero hidden size")).into(),
+        );
     }
     if manifest.hyperparameters.intermediate_size == 0 {
         return Err(OlmError::FieldValidation(String::from(
             "Must have non-zero intermediate size",
-        )));
+        ))
+        .into());
     }
     if manifest.hyperparameters.num_hidden_layers == 0 {
-        return Err(OlmError::FieldValidation(String::from(
-            "Must have non-zero hidden layers",
-        )));
+        return Err(
+            OlmError::FieldValidation(String::from("Must have non-zero hidden layers")).into(),
+        );
     }
     if manifest.hyperparameters.num_attention_heads == 0 {
-        return Err(OlmError::FieldValidation(String::from(
-            "Must have non-zero attention heads",
-        )));
+        return Err(
+            OlmError::FieldValidation(String::from("Must have non-zero attention heads")).into(),
+        );
     }
     if manifest.hyperparameters.num_key_value_heads == 0 {
-        return Err(OlmError::FieldValidation(String::from(
-            "Must have non-zero KV heads",
-        )));
+        return Err(OlmError::FieldValidation(String::from("Must have non-zero KV heads")).into());
     }
     if manifest.hyperparameters.num_attention_heads % manifest.hyperparameters.num_key_value_heads
         != 0
     {
         return Err(OlmError::FieldValidation(String::from(
             "KV heads must divide the attention heads",
-        )));
+        ))
+        .into());
     }
     if manifest.hyperparameters.head_dim == 0 {
-        return Err(OlmError::FieldValidation(String::from(
-            "Must have non-zero head dimension",
-        )));
+        return Err(
+            OlmError::FieldValidation(String::from("Must have non-zero head dimension")).into(),
+        );
     }
     if manifest.hyperparameters.head_dim % 2 != 0 {
-        return Err(OlmError::FieldValidation(String::from(
-            "Must have even head dimension",
-        )));
+        return Err(
+            OlmError::FieldValidation(String::from("Must have even head dimension")).into(),
+        );
     }
     if manifest.hyperparameters.vocab_size == 0 {
-        return Err(OlmError::FieldValidation(String::from(
-            "Must have non-zero vocab size",
-        )));
+        return Err(
+            OlmError::FieldValidation(String::from("Must have non-zero vocab size")).into(),
+        );
     }
     if manifest.hyperparameters.rms_norm_eps <= 0.0 {
         return Err(OlmError::FieldValidation(String::from(
             "Must have non-zero, positive RMS norm EPS",
-        )));
+        ))
+        .into());
     }
     if manifest.tokenizer.bos_token_id.is_some()
         && manifest.tokenizer.bos_token_id.unwrap() as usize >= manifest.hyperparameters.vocab_size
     {
         return Err(OlmError::FieldValidation(String::from(
             "BOS token ID must fit in the vocab size",
-        )));
+        ))
+        .into());
     }
     if manifest
         .tokenizer
@@ -90,14 +91,15 @@ pub fn get_manifest(json: &str) -> Result<Manifest, OlmError> {
     {
         return Err(OlmError::FieldValidation(String::from(
             "EOS token IDs must fit in the vocab size",
-        )));
+        ))
+        .into());
     }
     let tensor_requirements = get_tensor_requirements(&manifest);
     for (tensor_name, req) in tensor_requirements.iter() {
         if req.is_required && !manifest.tensors.contains_key(tensor_name) {
-            return Err(OlmError::FieldValidation(format!(
-                "{tensor_name} is a required tensor"
-            )));
+            return Err(
+                OlmError::FieldValidation(format!("{tensor_name} is a required tensor")).into(),
+            );
         }
     }
     for (tensor_name, tensor) in manifest.tensors.iter() {
@@ -105,19 +107,22 @@ pub fn get_manifest(json: &str) -> Result<Manifest, OlmError> {
         if tensor_requirement.is_none() {
             return Err(OlmError::FieldValidation(format!(
                 "Tensor {tensor_name} is an unrecognized tensor"
-            )));
+            ))
+            .into());
         }
         let tensor_requirement = tensor_requirement.unwrap();
         if tensor.shape != tensor_requirement.shape {
             return Err(OlmError::FieldValidation(format!(
                 "Tensor {tensor_name} has an invalid shape"
-            )));
+            ))
+            .into());
         }
         for required_with in &tensor_requirement.required_with {
             if !manifest.tensors.contains_key(required_with) {
                 return Err(OlmError::FieldValidation(format!(
                     "Tensor {tensor_name} needs to be accompanied with {required_with}"
-                )));
+                ))
+                .into());
             }
         }
     }
@@ -129,7 +134,8 @@ pub fn get_manifest(json: &str) -> Result<Manifest, OlmError> {
     if theta <= 0.0 {
         return Err(OlmError::FieldValidation(String::from(
             "Must have non-zero, positive RoPE theta",
-        )));
+        ))
+        .into());
     }
     Ok(manifest)
 }

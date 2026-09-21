@@ -1,23 +1,31 @@
-use std::fmt;
-use std::write;
+use std::collections::BTreeMap;
+use std::error::Error;
+use std::path::Path;
+use thiserror::Error;
 
 pub mod manifest;
 
-#[derive(Debug)]
-pub enum OlmError {
-    InvalidJson(String),
-    RankMismatch(String, usize),
-    FieldValidation(String),
+pub struct Model {
+    pub manifest: manifest::Manifest,
+    pub tensor_data: BTreeMap<String, tensor::Tensor>,
 }
 
-impl fmt::Display for OlmError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            OlmError::InvalidJson(message) => write!(f, "{message}"),
-            OlmError::RankMismatch(name, rank) => {
-                write!(f, "{name} has unsupported rank of {rank}")
-            }
-            OlmError::FieldValidation(message) => write!(f, "{message}"),
-        }
+impl Model {
+    pub fn new(path: impl AsRef<Path>) -> Result<(), Box<dyn Error>> {
+        let _ = std::fs::read_to_string(path)?;
+        Ok(())
     }
+}
+
+#[derive(Debug, Error)]
+pub enum OlmError {
+    #[error("{name} has unsupported rank of {rank}")]
+    RankMismatch { name: String, rank: usize },
+    #[error("{0}")]
+    FieldValidation(String),
+    #[error("{name} cannot be converted to a tensor: {source}")]
+    TensorError {
+        name: String,
+        source: tensor::TensorError,
+    },
 }

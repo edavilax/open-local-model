@@ -1,10 +1,11 @@
-use crate::TensorError::OutOfBounds;
 use memmap2::Mmap;
 use serde::Deserialize;
+use std::error::Error;
 use std::{
     fmt::{self},
     vec, write,
 };
+use thiserror::Error;
 
 #[derive(Debug)]
 pub enum Storage {
@@ -44,20 +45,22 @@ impl fmt::Display for Dtype {
 }
 
 #[derive(Debug)]
-pub struct Tensor<const R: usize> {
-    shape: [usize; R],
+pub struct Tensor {
+    shape: Vec<usize>,
     dtype: Dtype,
     storage: Storage,
 }
-pub type Vector = Tensor<1>;
-pub type Matrix = Tensor<2>;
 
-impl<const R: usize> Tensor<R> {
-    pub fn new(shape: [usize; R], dtype: Dtype, storage: Storage) -> Result<Self, TensorError> {
+impl Tensor {
+    pub fn new(shape: Vec<usize>, dtype: Dtype, storage: Storage) -> Result<Self, Box<dyn Error>> {
         let shape_size: usize = shape.iter().product();
         let shape_size = shape_size * dtype.size_bytes();
         if shape_size != storage.size_bytes() {
-            return Err(TensorError::SizeMismatch(shape_size, storage.size_bytes()));
+            return Err(TensorError::SizeMismatch {
+                shape_size,
+                data_size: storage.size_bytes(),
+            }
+            .into());
         }
         match storage {
             Storage::Heap(_) => {
@@ -78,20 +81,16 @@ impl<const R: usize> Tensor<R> {
         })
     }
 
-    pub fn zeros_f32(shape: [usize; R]) -> Self {
-        Tensor::new(
-            shape,
-            Dtype::F32,
-            Storage::Heap(vec![0.0; shape.iter().product()]),
-        )
-        .unwrap()
+    pub fn zeros_f32(shape: Vec<usize>) -> Self {
+        let heap_size = shape.iter().product();
+        Tensor::new(shape, Dtype::F32, Storage::Heap(vec![0.0; heap_size])).unwrap()
     }
 
-    pub fn shape(&self) -> &[usize; R] {
+    pub fn shape(&self) -> &[usize] {
         &self.shape
     }
 
-    pub fn as_f32(&self) -> Result<&[f32], TensorError> {
+    pub fn as_f32(&self) -> Result<&[f32], Box<dyn Error>> {
         self.check_dtype(Dtype::F32)?;
         match &self.storage {
             Storage::Heap(v) => Ok(v.as_slice()),
@@ -99,111 +98,72 @@ impl<const R: usize> Tensor<R> {
         }
     }
 
-    pub fn as_mut_f32(&mut self) -> Result<&mut [f32], TensorError> {
+    pub fn as_mut_f32(&mut self) -> Result<&mut [f32], Box<dyn Error>> {
         self.check_dtype(Dtype::F32)?;
         match &mut self.storage {
             Storage::Heap(v) => Ok(v.as_mut_slice()),
-            Storage::Mmap(_) => Err(TensorError::ReadOnly),
+            Storage::Mmap(_) => Err(TensorError::ReadOnly.into()),
         }
     }
 
-    fn get_index(&self, coords: &[usize; R]) -> usize {
-        let mut idx = 0usize;
-        let mut idx_offset = 1usize;
-        for (i, x) in coords.iter().enumerate().rev() {
-            idx += x * idx_offset;
-            idx_offset *= self.shape[i];
-        }
-        idx
-    }
-
-    fn check_bounds(&self, coords: &[usize; R]) -> Result<(), TensorError> {
-        for (i, x) in coords.iter().enumerate() {
-            if *x >= self.shape[i] {
-                return Err(OutOfBounds());
+    pub fn dim1(&self) -> Result<usize, Box<dyn Error>> {
+        if self.shape.len() != 1 {
+            return Err(TensorError::BadRank {
+                expected: 1,
+                actual: self.shape.len(),
             }
+            .into());
         }
-        Ok(())
+        Ok(self.shape[0])
     }
 
-    fn check_dtype(&self, dtype: Dtype) -> Result<(), TensorError> {
+    pub fn dim2(&self) -> Result<(usize, usize), Box<dyn Error>> {
+        if self.shape.len() != 2 {
+            return Err(TensorError::BadRank {
+                expected: 2,
+                actual: self.shape.len(),
+            }
+            .into());
+        }
+        Ok((self.shape[0], self.shape[1]))
+    }
+
+    fn check_dtype(&self, dtype: Dtype) -> Result<(), Box<dyn Error>> {
         if self.dtype != dtype {
-            return Err(TensorError::DtypeMismatch(dtype, self.dtype));
+            return Err(TensorError::DtypeMismatch {
+                expected: dtype,
+                actual: self.dtype,
+            }
+            .into());
         }
         Ok(())
     }
 }
 
-impl Matrix {
-    pub fn num_rows(&self) -> usize {
-        self.shape[0]
-    }
-
-    pub fn num_cols(&self) -> usize {
-        self.shape[1]
-    }
-
-    pub fn row_f32(&self, m: usize) -> Result<&[f32], TensorError> {
-        self.check_bounds(&[m, 0])?;
-        let i = self.get_index(&[m, 0]);
-        let j = self.get_index(&[m, self.num_cols()]);
-        let data = self.as_f32()?;
-        if j > data.len() {
-            return Err(OutOfBounds());
-        }
-        Ok(&data[i..j])
-    }
-
-    pub fn row_f32_mut(&mut self, m: usize) -> Result<&mut [f32], TensorError> {
-        self.check_bounds(&[m, 0])?;
-        let i = self.get_index(&[m, 0]);
-        let j = self.get_index(&[m, self.num_cols()]);
-        let data = self.as_mut_f32()?;
-        if j > data.len() {
-            return Err(OutOfBounds());
-        }
-        Ok(&mut data[i..j])
-    }
-}
-
-fn cast_f32(bytes: &[u8]) -> Result<&[f32], TensorError> {
+fn cast_f32(bytes: &[u8]) -> Result<&[f32], Box<dyn Error>> {
     let ptr = bytes.as_ptr().cast::<f32>();
     if !ptr.is_aligned() || bytes.len() % size_of::<f32>() != 0 {
-        return Err(TensorError::BadLayout(Dtype::F32));
+        return Err(TensorError::BadLayout(Dtype::F32).into());
     }
     Ok(unsafe { std::slice::from_raw_parts(ptr, bytes.len() / size_of::<f32>()) })
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum TensorError {
-    SizeMismatch(usize, usize),
-    OutOfBounds(),
-    DtypeMismatch(Dtype, Dtype),
+    #[error("Tensor shape needs {shape_size} elements but got {data_size} elements from data")]
+    SizeMismatch { shape_size: usize, data_size: usize },
+    #[error("Out of bounds access to tensor")]
+    OutOfBounds,
+    #[error("Tried to fetch dtype {expected} but got {actual}")]
+    DtypeMismatch { expected: Dtype, actual: Dtype },
+    #[error("{0}")]
     IncompatibleStorage(String),
+    #[error("Attempting to access write view of read-only memory")]
     ReadOnly,
+    #[error("Expected rank of {expected} but got {actual}")]
+    BadRank { expected: usize, actual: usize },
+    #[error("Cannot cast a set of bytes to a {0} equivalent")]
     BadLayout(Dtype),
-}
-
-impl fmt::Display for TensorError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TensorError::SizeMismatch(shape_size, data_size) => write!(
-                f,
-                "Tensor shape needs {shape_size} elements but got {data_size} elements from data"
-            ),
-            TensorError::OutOfBounds() => write!(f, "Out of bounds access to tensor"),
-            TensorError::DtypeMismatch(expected, actual) => {
-                write!(f, "Tried to fetch dtype {expected} but got {actual}")
-            }
-            TensorError::IncompatibleStorage(m) => write!(f, "{m}"),
-            TensorError::ReadOnly => {
-                write!(f, "Attempting to access write view of read-only memory")
-            }
-            TensorError::BadLayout(dtype) => {
-                write!(f, "Cannot cast a set of bytes to a {dtype} equivalent")
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -215,356 +175,207 @@ mod tests {
         Storage::Heap(data.to_vec())
     }
 
-    /// A [3, 4] matrix where each value encodes its position as
-    /// `row * 10 + col`, so a wrong offset shows up as a recognizably wrong
-    /// number rather than just "not equal".
-    fn m_3x4() -> Matrix {
-        let data: Vec<f32> = (0..3)
-            .flat_map(|r| (0..4).map(move |c| (r * 10 + c) as f32))
-            .collect();
-        Matrix::new([3, 4], Dtype::F32, Storage::Heap(data)).unwrap()
+    fn mapped(shape: Vec<usize>, data: &[f32]) -> Tensor {
+        Tensor::new(shape, Dtype::F32, Storage::Mmap(mmap_f32(data))).unwrap()
     }
 
-    // Construction.
-    //
-    // `DtypeMismatch` and `IncompatibleStorage` cannot be reached yet: both
-    // need a second dtype to exist. Add their tests alongside that dtype.
-    // `BadLayout` by length cannot be reached either: `new` already rejects
-    // any storage whose byte count is not the shape's, so only misalignment
-    // gets that far.
+    #[track_caller]
+    fn tensor_err<T: std::fmt::Debug>(result: Result<T, Box<dyn Error>>) -> TensorError {
+        *result.unwrap_err().downcast().expect("not a TensorError")
+    }
 
-    /// A rank-0 tensor is a scalar. The empty product is 1, so it holds
-    /// exactly one element.
+    // Construction
+
     #[test]
     fn rank_zero_tensor_holds_one_element() {
-        let t = Tensor::<0>::new([], Dtype::F32, heap(&[1.5])).unwrap();
-        assert_eq!(t.shape().len(), 0);
+        let t = Tensor::new(vec![], Dtype::F32, heap(&[1.5])).unwrap();
+        assert!(t.shape().is_empty());
         assert_eq!(t.as_f32().unwrap(), &[1.5]);
     }
 
     #[test]
     fn shape_is_reported_as_given() {
-        let t = Matrix::zeros_f32([2, 3]);
-        assert_eq!(t.shape(), &[2, 3]);
-        assert_eq!(t.num_rows(), 2);
-        assert_eq!(t.num_cols(), 3);
+        assert_eq!(Tensor::zeros_f32(vec![2, 3]).shape(), &[2, 3]);
+        assert_eq!(Tensor::zeros_f32(vec![2, 3, 4]).shape(), &[2, 3, 4]);
     }
 
-    /// A zero anywhere in the shape means no data at all, and that is valid.
-    /// Embedding lookup with an empty prompt produces exactly this.
     #[test]
     fn zero_sized_dimension_holds_no_data() {
-        let t = Tensor::<3>::new([0, 1, 2], Dtype::F32, heap(&[])).unwrap();
-        assert_eq!(t.shape(), &[0, 1, 2]);
+        let t = Tensor::new(vec![0, 1, 2], Dtype::F32, heap(&[])).unwrap();
         assert!(t.as_f32().unwrap().is_empty());
     }
 
+    // Both sizes are in bytes.
     #[test]
-    fn new_accepts_data_matching_the_shape() {
-        assert!(Matrix::new([1, 2], Dtype::F32, heap(&[1.0, 1.5])).is_ok());
-    }
-
-    /// The payload is (expected, actual) in bytes. Pinning both values also
-    /// pins their order, which a bare `is_err()` would not.
-    #[test]
-    fn new_rejects_too_little_data() {
-        let err = Matrix::new([1, 3], Dtype::F32, heap(&[1.0, 1.5])).unwrap_err();
+    fn new_rejects_data_that_does_not_fit_the_shape() {
+        let err = tensor_err(Tensor::new(vec![1, 3], Dtype::F32, heap(&[1.0, 1.5])));
         assert!(
-            matches!(err, TensorError::SizeMismatch(12, 8)),
-            "got {err:?}"
+            matches!(
+                err,
+                TensorError::SizeMismatch {
+                    shape_size: 12,
+                    data_size: 8
+                }
+            ),
+            "{err:?}"
         );
-    }
 
-    #[test]
-    fn new_rejects_too_much_data() {
-        let err = Matrix::new([1, 2], Dtype::F32, heap(&[1.0, 1.5, 2.0])).unwrap_err();
+        let err = tensor_err(Tensor::new(vec![2], Dtype::F32, heap(&[1.0, 1.5, 2.0])));
         assert!(
-            matches!(err, TensorError::SizeMismatch(8, 12)),
-            "got {err:?}"
+            matches!(
+                err,
+                TensorError::SizeMismatch {
+                    shape_size: 8,
+                    data_size: 12
+                }
+            ),
+            "{err:?}"
         );
     }
 
     #[test]
     fn zeros_f32_is_all_zero_and_sized_by_the_shape() {
-        let t = Tensor::<3>::zeros_f32([2, 3, 4]);
-        let data = t.as_f32().unwrap();
-        assert_eq!(data.len(), 24);
-        assert!(data.iter().all(|x| *x == 0.0));
+        let t = Tensor::zeros_f32(vec![2, 3, 4]);
+        assert_eq!(t.as_f32().unwrap(), &[0.0; 24]);
     }
 
-    /// `Display` is what ends up in error messages and CLI output, so it
-    /// should use the same names as the OLM spec's dtype enum.
     #[test]
     fn dtype_display_uses_spec_names() {
         assert_eq!(Dtype::F32.to_string(), "f32");
     }
 
-    // Whole-tensor views.
+    // Views
 
     #[test]
-    fn as_f32_exposes_data_in_row_major_order() {
-        let t = m_3x4();
-        assert_eq!(
-            t.as_f32().unwrap(),
-            &[
-                0.0, 1.0, 2.0, 3.0, // row 0
-                10.0, 11.0, 12.0, 13.0, // row 1
-                20.0, 21.0, 22.0, 23.0, // row 2
-            ]
-        );
+    fn as_f32_exposes_the_data_in_order() {
+        let t = Tensor::new(vec![2, 2], Dtype::F32, heap(&[1.0, 2.0, 3.0, 4.0])).unwrap();
+        assert_eq!(t.as_f32().unwrap(), &[1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]
     fn as_mut_f32_writes_are_visible_through_as_f32() {
-        let mut t = Matrix::zeros_f32([2, 2]);
+        let mut t = Tensor::zeros_f32(vec![2, 2]);
         t.as_mut_f32().unwrap()[3] = 7.5;
         assert_eq!(t.as_f32().unwrap(), &[0.0, 0.0, 0.0, 7.5]);
     }
 
-    // Row views.
+    // Rank
 
-    /// Every row, including the last. The last row's exclusive end index
-    /// equals the data length, which is where an off-by-one in the bounds
-    /// check shows up.
     #[test]
-    fn row_f32_returns_each_row() {
-        let t = m_3x4();
-        assert_eq!(t.row_f32(0).unwrap(), &[0.0, 1.0, 2.0, 3.0]);
-        assert_eq!(t.row_f32(1).unwrap(), &[10.0, 11.0, 12.0, 13.0]);
-        assert_eq!(t.row_f32(2).unwrap(), &[20.0, 21.0, 22.0, 23.0]);
-    }
-
-    /// The decode shape: one row, so the first row is also the last.
-    #[test]
-    fn row_f32_on_single_row_matrix() {
-        let t = Matrix::new([1, 3], Dtype::F32, heap(&[1.0, 2.0, 3.0])).unwrap();
-        assert_eq!(t.row_f32(0).unwrap(), &[1.0, 2.0, 3.0]);
-    }
-
-    /// With one column each row is a single element, so row `m` spans
-    /// `m..m + 1`. Catches stride mistakes that a square matrix hides.
-    #[test]
-    fn row_f32_on_single_column_matrix() {
-        let t = Matrix::new([3, 1], Dtype::F32, heap(&[5.0, 6.0, 7.0])).unwrap();
-        assert_eq!(t.row_f32(0).unwrap(), &[5.0]);
-        assert_eq!(t.row_f32(1).unwrap(), &[6.0]);
-        assert_eq!(t.row_f32(2).unwrap(), &[7.0]);
+    fn dim1_and_dim2_return_the_dimensions() {
+        assert_eq!(Tensor::zeros_f32(vec![5]).dim1().unwrap(), 5);
+        assert_eq!(Tensor::zeros_f32(vec![2, 3]).dim2().unwrap(), (2, 3));
+        assert_eq!(Tensor::zeros_f32(vec![0, 3]).dim2().unwrap(), (0, 3));
     }
 
     #[test]
-    fn row_f32_rejects_rows_past_the_end() {
-        let t = m_3x4();
-        for m in [3, 4, usize::MAX / 8] {
-            let err = t.row_f32(m).unwrap_err();
+    fn dim1_rejects_other_ranks() {
+        for shape in [vec![], vec![2, 3], vec![2, 3, 4]] {
+            let rank = shape.len();
+            let err = tensor_err(Tensor::zeros_f32(shape).dim1());
             assert!(
-                matches!(err, TensorError::OutOfBounds()),
-                "row {m}: got {err:?}"
+                matches!(err, TensorError::BadRank { expected: 1, actual } if actual == rank),
+                "{err:?}"
             );
         }
     }
 
     #[test]
-    fn row_f32_rejects_any_row_of_a_matrix_with_no_rows() {
-        let t = Matrix::zeros_f32([0, 3]);
-        assert!(matches!(t.row_f32(0), Err(TensorError::OutOfBounds())));
+    fn dim2_rejects_other_ranks() {
+        for shape in [vec![], vec![6], vec![2, 3, 4]] {
+            let rank = shape.len();
+            let err = tensor_err(Tensor::zeros_f32(shape).dim2());
+            assert!(
+                matches!(err, TensorError::BadRank { expected: 2, actual } if actual == rank),
+                "{err:?}"
+            );
+        }
     }
 
-    /// Writing through a row view must land in that row only. Uses the last
-    /// row for the same reason as `row_f32_returns_each_row`.
-    #[test]
-    fn row_f32_mut_writes_only_the_requested_row() {
-        let mut t = m_3x4();
-        t.row_f32_mut(2)
-            .unwrap()
-            .copy_from_slice(&[-1.0, -2.0, -3.0, -4.0]);
-        assert_eq!(
-            t.as_f32().unwrap(),
-            &[
-                0.0, 1.0, 2.0, 3.0, // row 0 untouched
-                10.0, 11.0, 12.0, 13.0, // row 1 untouched
-                -1.0, -2.0, -3.0, -4.0, // row 2 replaced
-            ]
-        );
-    }
-
-    #[test]
-    fn row_f32_mut_returns_each_row() {
-        let mut t = m_3x4();
-        assert_eq!(t.row_f32_mut(0).unwrap(), &[0.0, 1.0, 2.0, 3.0]);
-        assert_eq!(t.row_f32_mut(1).unwrap(), &[10.0, 11.0, 12.0, 13.0]);
-        assert_eq!(t.row_f32_mut(2).unwrap(), &[20.0, 21.0, 22.0, 23.0]);
-    }
-
-    #[test]
-    fn row_f32_mut_rejects_rows_past_the_end() {
-        let mut t = m_3x4();
-        let err = t.row_f32_mut(3).unwrap_err();
-        assert!(matches!(err, TensorError::OutOfBounds()), "got {err:?}");
-    }
-
-    // Mapped storage. The helpers map throwaway temp files; see testutil::mmap.
-
-    /// Same position-encoding matrix as `m_3x4`, but backed by a mapping.
-    fn mapped_3x4() -> Matrix {
-        let data = m_3x4().as_f32().unwrap().to_vec();
-        Matrix::new([3, 4], Dtype::F32, Storage::Mmap(mmap_f32(&data))).unwrap()
-    }
+    // Mapped storage
+    //
+    // `DtypeMismatch` and `IncompatibleStorage` need a second dtype to be
+    // reachable. `BadLayout` by length is unreachable: `new` already rejects
+    // storage whose byte count is not the shape's.
 
     #[test]
     fn mapped_tensor_exposes_the_file_contents() {
         let values = [1.5, -2.0, 0.0, 3.25, 1e-10, f32::MAX];
-        let t = Vector::new([6], Dtype::F32, Storage::Mmap(mmap_f32(&values))).unwrap();
-        assert_eq!(t.shape(), &[6]);
-        assert_eq!(t.as_f32().unwrap(), &values);
+        assert_eq!(mapped(vec![2, 3], &values).as_f32().unwrap(), &values);
     }
 
-    /// The point of mapped storage: the view is the mapping, not a copy of
-    /// it. The slice must start at the mapping's own address.
+    // Zero-copy: the view starts at the mapping's own address.
     #[test]
     fn mapped_view_points_into_the_mapping() {
         let map = mmap_f32(&[1.0, 2.0, 3.0, 4.0]);
-        let mapping_addr = map.as_ptr() as usize;
-        let t = Vector::new([4], Dtype::F32, Storage::Mmap(map)).unwrap();
-        assert_eq!(t.as_f32().unwrap().as_ptr() as usize, mapping_addr);
+        let addr = map.as_ptr() as usize;
+        let t = Tensor::new(vec![4], Dtype::F32, Storage::Mmap(map)).unwrap();
+        assert_eq!(t.as_f32().unwrap().as_ptr() as usize, addr);
     }
 
-    /// A reinterpreting view must not normalize anything. NaN payloads, the
-    /// sign of zero and subnormals all survive only if no float arithmetic
-    /// or conversion touches the bytes.
+    // NaN payloads, -0.0, a subnormal and +inf survive only if nothing converts the bytes.
     #[test]
     fn mapped_view_preserves_exact_bit_patterns() {
         let bits = [
-            0x7FC0_1234_u32, // quiet NaN with a payload
-            0xFFF0_0001,     // negative NaN, different payload
-            0x8000_0000,     // -0.0
-            0x0000_0001,     // smallest subnormal
-            0x7F80_0000,     // +inf
+            0x7FC0_1234_u32,
+            0xFFF0_0001,
+            0x8000_0000,
+            0x0000_0001,
+            0x7F80_0000,
         ];
         let values: Vec<f32> = bits.iter().map(|b| f32::from_bits(*b)).collect();
-        let t = Vector::new([5], Dtype::F32, Storage::Mmap(mmap_f32(&values))).unwrap();
+        let t = mapped(vec![5], &values);
         let seen: Vec<u32> = t.as_f32().unwrap().iter().map(|v| v.to_bits()).collect();
         assert_eq!(seen, bits);
     }
 
     #[test]
     fn new_rejects_mapped_storage_of_the_wrong_size() {
-        let err = Vector::new([3], Dtype::F32, Storage::Mmap(mmap_f32(&[1.0, 2.0]))).unwrap_err();
+        let err = tensor_err(Tensor::new(
+            vec![3],
+            Dtype::F32,
+            Storage::Mmap(mmap_f32(&[1.0, 2.0])),
+        ));
         assert!(
-            matches!(err, TensorError::SizeMismatch(12, 8)),
-            "got {err:?}"
+            matches!(
+                err,
+                TensorError::SizeMismatch {
+                    shape_size: 12,
+                    data_size: 8
+                }
+            ),
+            "{err:?}"
         );
     }
 
-    /// Row views go through the same cast, so they work on mappings too,
-    /// last row included.
-    #[test]
-    fn row_f32_returns_each_row_of_a_mapped_matrix() {
-        let t = mapped_3x4();
-        assert_eq!(t.row_f32(0).unwrap(), &[0.0, 1.0, 2.0, 3.0]);
-        assert_eq!(t.row_f32(1).unwrap(), &[10.0, 11.0, 12.0, 13.0]);
-        assert_eq!(t.row_f32(2).unwrap(), &[20.0, 21.0, 22.0, 23.0]);
-        assert!(matches!(t.row_f32(3), Err(TensorError::OutOfBounds())));
-    }
-
-    /// Weights are mapped without write permission. A mutable view must be
-    /// refused up front; handing one out would fault on the first write.
     #[test]
     fn as_mut_f32_refuses_mapped_storage() {
-        let mut t = mapped_3x4();
-        let err = t.as_mut_f32().unwrap_err();
-        assert!(matches!(err, TensorError::ReadOnly), "got {err:?}");
+        let mut t = mapped(vec![2], &[1.0, 2.0]);
+        assert!(matches!(tensor_err(t.as_mut_f32()), TensorError::ReadOnly));
+        assert_eq!(t.as_f32().unwrap(), &[1.0, 2.0]); // still readable
     }
 
-    #[test]
-    fn row_f32_mut_refuses_mapped_storage() {
-        let mut t = mapped_3x4();
-        let err = t.row_f32_mut(0).unwrap_err();
-        assert!(matches!(err, TensorError::ReadOnly), "got {err:?}");
-    }
-
-    /// A refused mutable view must not poison the tensor for reading.
-    #[test]
-    fn mapped_tensor_is_still_readable_after_a_refused_write() {
-        let mut t = mapped_3x4();
-        assert!(t.as_mut_f32().is_err());
-        assert_eq!(t.row_f32(1).unwrap(), &[10.0, 11.0, 12.0, 13.0]);
-    }
-
-    /// An `&[f32]` to a misaligned address is undefined behavior in Rust even
-    /// on CPUs that tolerate unaligned loads, so the cast must refuse rather
-    /// than reinterpret. Construction still succeeds, because the byte count
-    /// is right; the view is where alignment matters.
+    // Construction succeeds because the byte count is right; the view is where alignment matters.
     #[test]
     fn as_f32_rejects_a_misaligned_mapping() {
         let map = mmap_f32_misaligned(&[1.0, 2.0, 3.0]);
-        let t = Vector::new([3], Dtype::F32, Storage::Mmap(map)).unwrap();
-        let err = t.as_f32().unwrap_err();
-        assert!(
-            matches!(err, TensorError::BadLayout(Dtype::F32)),
-            "got {err:?}"
-        );
+        let t = Tensor::new(vec![3], Dtype::F32, Storage::Mmap(map)).unwrap();
+        let err = tensor_err(t.as_f32());
+        assert!(matches!(err, TensorError::BadLayout(Dtype::F32)), "{err:?}");
     }
 
-    #[test]
-    fn row_f32_rejects_a_misaligned_mapping() {
-        let map = mmap_f32_misaligned(&[1.0, 2.0, 3.0, 4.0]);
-        let t = Matrix::new([2, 2], Dtype::F32, Storage::Mmap(map)).unwrap();
-        let err = t.row_f32(0).unwrap_err();
-        assert!(
-            matches!(err, TensorError::BadLayout(Dtype::F32)),
-            "got {err:?}"
-        );
-    }
-
-    /// The real thing: a weight file from the toy model, mapped whole, read
-    /// row by row, and compared against an independent decode of the same
-    /// bytes. `k_proj` is [32, 64] f32 with random values, so a wrong stride
-    /// or offset cannot match by accident.
+    // A real toy weight, mapped whole, against an independent decode of the same bytes.
     #[test]
     fn mapped_fixture_weight_matches_an_independent_decode() {
         let path = fixture("toy-f32/model/weights/layers.0.attn.k_proj.bin");
         let expected: Vec<f32> = std::fs::read(&path)
             .unwrap()
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect();
-        assert_eq!(expected.len(), 32 * 64);
-
-        let t = Matrix::new([32, 64], Dtype::F32, Storage::Mmap(mmap_file(&path))).unwrap();
-        for m in 0..32 {
-            assert_eq!(
-                t.row_f32(m).unwrap(),
-                &expected[m * 64..(m + 1) * 64],
-                "row {m}"
-            );
-        }
-    }
-
-    // Private index math. Row accessors only exercise it at rank 2.
-
-    /// Row-major means the last coordinate moves fastest: the stride of each
-    /// dimension is the product of the dimensions after it.
-    #[test]
-    fn get_index_is_row_major() {
-        let t = Tensor::<3>::zeros_f32([2, 3, 4]);
-        assert_eq!(t.get_index(&[0, 0, 0]), 0);
-        assert_eq!(t.get_index(&[0, 0, 1]), 1);
-        assert_eq!(t.get_index(&[0, 1, 0]), 4);
-        assert_eq!(t.get_index(&[1, 0, 0]), 12);
-        assert_eq!(t.get_index(&[1, 2, 3]), 23);
-    }
-
-    /// A coordinate equal to its dimension is already out of range, in any
-    /// position, even when the other coordinates are fine.
-    #[test]
-    fn check_bounds_rejects_a_coordinate_at_or_past_its_dimension() {
-        let t = Tensor::<3>::zeros_f32([2, 3, 4]);
-        assert!(t.check_bounds(&[1, 2, 3]).is_ok());
-        for coords in [[2, 0, 0], [0, 3, 0], [0, 0, 4]] {
-            assert!(
-                matches!(t.check_bounds(&coords), Err(TensorError::OutOfBounds())),
-                "{coords:?} should be out of bounds"
-            );
-        }
+        let t = Tensor::new(vec![32, 64], Dtype::F32, Storage::Mmap(mmap_file(&path))).unwrap();
+        assert_eq!(t.as_f32().unwrap(), expected);
     }
 }

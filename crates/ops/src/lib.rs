@@ -1,10 +1,13 @@
-use tensor::{Matrix, Tensor, Vector};
+use itertools::izip;
+use std::error::Error;
+use tensor::Tensor;
+use thiserror::Error;
 
 pub mod cpubackend;
 
 pub struct RopeTable {
-    cos: Matrix,
-    sin: Matrix,
+    cos: Tensor,
+    sin: Tensor,
 }
 
 impl RopeTable {
@@ -15,20 +18,24 @@ impl RopeTable {
         assert!(theta > 0.0);
         let m = max_seq;
         let n = head_dim / 2;
-        let mut cos = Matrix::zeros_f32([m, n]);
-        let mut sin = Matrix::zeros_f32([m, n]);
+        let mut cos = Tensor::zeros_f32(vec![m, n]);
+        let mut sin = Tensor::zeros_f32(vec![m, n]);
         // Calculate frequencies.
         let mut freqs: Vec<f32> = Vec::new();
         for i in 0..n {
             freqs.push(1.0 / (theta.powf(2.0 * (i as f32) / (head_dim as f32))));
         }
         // Calculate cosines/sines for each step.
-        for i in 0..m {
+        for (i, cos_row, sin_row) in izip!(
+            0usize..,
+            cos.as_mut_f32().unwrap().chunks_exact_mut(n),
+            sin.as_mut_f32().unwrap().chunks_exact_mut(n),
+        ) {
             let step = i as f32;
-            let cos_row: Vec<f32> = freqs.iter().map(|x| (x * step).cos()).collect();
-            cos.row_f32_mut(i).unwrap().copy_from_slice(&cos_row);
-            let sin_row: Vec<f32> = freqs.iter().map(|x| (x * step).sin()).collect();
-            sin.row_f32_mut(i).unwrap().copy_from_slice(&sin_row);
+            izip!(cos_row.iter_mut(), freqs.iter())
+                .for_each(|(cos_val, freq)| *cos_val = (freq * step).cos());
+            izip!(sin_row.iter_mut(), freqs.iter())
+                .for_each(|(sin_val, freq)| *sin_val = (freq * step).sin());
         }
         RopeTable { cos, sin }
     }
@@ -36,12 +43,7 @@ impl RopeTable {
 
 pub trait Backend {
     /// Adds two same-shaped tensors together, and provides the results to `out`.
-    fn add<const R: usize>(
-        &self,
-        a: &Tensor<R>,
-        b: &Tensor<R>,
-        out: &mut Tensor<R>,
-    ) -> Result<(), OpsError>;
+    fn add(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), Box<dyn Error>>;
 
     /// Performs a 2D matrix multiplication, and provides the results to `out`.
     ///
@@ -49,16 +51,16 @@ pub trait Backend {
     /// products. So a normal A\[n,k\] * B\[k,m\] will not work with this function.
     /// Instead, you must first transpose B such that the number of columns
     /// match.
-    fn matmul(&self, a: &Matrix, b: &Matrix, out: &mut Matrix) -> Result<(), OpsError>;
+    fn matmul(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), Box<dyn Error>>;
 
     /// Calculates the Hadamard product of two tensors, and provides the results
     /// to `out`.
-    fn hadamard_product<const R: usize>(
+    fn hadamard_product(
         &self,
-        a: &Tensor<R>,
-        b: &Tensor<R>,
-        out: &mut Tensor<R>,
-    ) -> Result<(), OpsError>;
+        a: &Tensor,
+        b: &Tensor,
+        out: &mut Tensor,
+    ) -> Result<(), Box<dyn Error>>;
 
     /// Normalizes each row of the input tensor by root-mean-square and provides
     /// the results to `out`.
@@ -68,7 +70,13 @@ pub trait Backend {
     /// the final norm calculation.
     ///
     /// `eps` is an additive factor to prevent divide by zero.
-    fn rmsnorm(&self, t: &Matrix, w: &Vector, eps: f32, out: &mut Matrix) -> Result<(), OpsError>;
+    fn rmsnorm(
+        &self,
+        t: &Tensor,
+        w: &Tensor,
+        eps: f32,
+        out: &mut Tensor,
+    ) -> Result<(), Box<dyn Error>>;
 
     /// Calculates the RoPE (Rotary Position Embeddings) of the input matrix,
     /// and provides the result to `out`.
@@ -83,20 +91,20 @@ pub trait Backend {
     /// N row will provide output for token positions [m_start, m_start + N).
     fn rope(
         &self,
-        t: &Matrix,
+        t: &Tensor,
         table: &RopeTable,
         m_start: usize,
-        out: &mut Matrix,
-    ) -> Result<(), OpsError>;
+        out: &mut Tensor,
+    ) -> Result<(), Box<dyn Error>>;
 
     /// Calculates the softmax of the input tensor, and provides the result to
     /// `out`.
     ///
     /// This method applies softmax row-wise.
-    fn softmax(&self, t: &Matrix, out: &mut Matrix) -> Result<(), OpsError>;
+    fn softmax(&self, t: &Tensor, out: &mut Tensor) -> Result<(), Box<dyn Error>>;
 
     /// Calculates Sigmoid Linear Unit (SiLU), and provides the results to `out`.
-    fn silu<const R: usize>(&self, t: &Tensor<R>, out: &mut Tensor<R>) -> Result<(), OpsError>;
+    fn silu(&self, t: &Tensor, out: &mut Tensor) -> Result<(), Box<dyn Error>>;
 
     /// Performs an embedding lookup and provides the results to `out`.
     ///
@@ -105,21 +113,15 @@ pub trait Backend {
     fn embedding_lookup(
         &self,
         ids: &[u32],
-        embed: &Matrix,
-        out: &mut Matrix,
-    ) -> Result<(), OpsError>;
+        embed: &Tensor,
+        out: &mut Tensor,
+    ) -> Result<(), Box<dyn Error>>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum OpsError {
-    TensorError(tensor::TensorError),
+    #[error("Tensor shapes do not fit this operation")]
     ShapeMismatch,
-}
-
-impl From<tensor::TensorError> for OpsError {
-    fn from(value: tensor::TensorError) -> Self {
-        OpsError::TensorError(value)
-    }
 }
 
 #[cfg(test)]
@@ -128,8 +130,13 @@ mod test {
 
     use super::*;
 
-    fn data<const R: usize>(t: &Tensor<R>) -> Vec<f32> {
+    fn data(t: &Tensor) -> Vec<f32> {
         t.as_f32().unwrap().to_vec()
+    }
+
+    fn row(t: &Tensor, i: usize) -> &[f32] {
+        let n = t.shape()[1];
+        &t.as_f32().unwrap()[i * n..(i + 1) * n]
     }
 
     #[test]
@@ -236,8 +243,8 @@ mod test {
         let (head_dim, theta) = (8, 1_000_000.0_f32);
         let table = RopeTable::new(head_dim, 2, theta);
         let angle = |j: usize| {
-            let s = table.sin.row_f32(1).unwrap()[j];
-            let c = table.cos.row_f32(1).unwrap()[j];
+            let s = row(&table.sin, 1)[j];
+            let c = row(&table.cos, 1)[j];
             s.atan2(c)
         };
         let ratio = theta.powf(-2.0 / head_dim as f32);

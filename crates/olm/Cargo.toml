@@ -7,6 +7,7 @@ edition = "2024"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.151"
 tensor = { workspace = true }
+thiserror = "2.0.20"
 
 [dev-dependencies]
 testutil = { workspace = true }
