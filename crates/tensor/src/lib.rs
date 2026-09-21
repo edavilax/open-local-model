@@ -1,5 +1,6 @@
 use crate::TensorError::OutOfBounds;
 use memmap2::Mmap;
+use serde::Deserialize;
 use std::{
     fmt::{self},
     vec, write,
@@ -20,7 +21,8 @@ impl Storage {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Dtype {
     F32,
 }

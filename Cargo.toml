@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = [ "crates/ops", "crates/tensor", "crates/testutil"]
+members = [ "crates/olm", "crates/ops", "crates/tensor", "crates/testutil"]
 
 [workspace.dependencies]
 tensor = { path = "crates/tensor" }
