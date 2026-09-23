@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -48,6 +54,7 @@ dependencies = [
 name = "olm"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "memmap2",
  "serde",
  "serde_json",
@@ -60,6 +67,7 @@ dependencies = [
 name = "ops"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "itertools",
  "tensor",
  "testutil",
@@ -142,6 +150,7 @@ dependencies = [
 name = "tensor"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "memmap2",
  "serde",
  "testutil",

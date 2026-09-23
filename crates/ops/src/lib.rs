@@ -1,5 +1,5 @@
+use anyhow::Result;
 use itertools::izip;
-use std::error::Error;
 use tensor::Tensor;
 use thiserror::Error;
 
@@ -43,7 +43,7 @@ impl RopeTable {
 
 pub trait Backend {
     /// Adds two same-shaped tensors together, and provides the results to `out`.
-    fn add(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), Box<dyn Error>>;
+    fn add(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<()>;
 
     /// Performs a 2D matrix multiplication, and provides the results to `out`.
     ///
@@ -51,16 +51,11 @@ pub trait Backend {
     /// products. So a normal A\[n,k\] * B\[k,m\] will not work with this function.
     /// Instead, you must first transpose B such that the number of columns
     /// match.
-    fn matmul(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), Box<dyn Error>>;
+    fn matmul(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<()>;
 
     /// Calculates the Hadamard product of two tensors, and provides the results
     /// to `out`.
-    fn hadamard_product(
-        &self,
-        a: &Tensor,
-        b: &Tensor,
-        out: &mut Tensor,
-    ) -> Result<(), Box<dyn Error>>;
+    fn hadamard_product(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<()>;
 
     /// Normalizes each row of the input tensor by root-mean-square and provides
     /// the results to `out`.
@@ -70,13 +65,7 @@ pub trait Backend {
     /// the final norm calculation.
     ///
     /// `eps` is an additive factor to prevent divide by zero.
-    fn rmsnorm(
-        &self,
-        t: &Tensor,
-        w: &Tensor,
-        eps: f32,
-        out: &mut Tensor,
-    ) -> Result<(), Box<dyn Error>>;
+    fn rmsnorm(&self, t: &Tensor, w: &Tensor, eps: f32, out: &mut Tensor) -> Result<()>;
 
     /// Calculates the RoPE (Rotary Position Embeddings) of the input matrix,
     /// and provides the result to `out`.
@@ -89,37 +78,26 @@ pub trait Backend {
     ///
     /// `m_start` is the starting index for the token offset. An input tensor of
     /// N row will provide output for token positions [m_start, m_start + N).
-    fn rope(
-        &self,
-        t: &Tensor,
-        table: &RopeTable,
-        m_start: usize,
-        out: &mut Tensor,
-    ) -> Result<(), Box<dyn Error>>;
+    fn rope(&self, t: &Tensor, table: &RopeTable, m_start: usize, out: &mut Tensor) -> Result<()>;
 
     /// Calculates the softmax of the input tensor, and provides the result to
     /// `out`.
     ///
     /// This method applies softmax row-wise.
-    fn softmax(&self, t: &Tensor, out: &mut Tensor) -> Result<(), Box<dyn Error>>;
+    fn softmax(&self, t: &Tensor, out: &mut Tensor) -> Result<()>;
 
     /// Calculates Sigmoid Linear Unit (SiLU), and provides the results to `out`.
-    fn silu(&self, t: &Tensor, out: &mut Tensor) -> Result<(), Box<dyn Error>>;
+    fn silu(&self, t: &Tensor, out: &mut Tensor) -> Result<()>;
 
     /// Performs an embedding lookup and provides the results to `out`.
     ///
     /// `ids` are the embeddings, and `embed` is the lookup table. All IDs
     /// must be bounded by the number of rows in the lookup table.
-    fn embedding_lookup(
-        &self,
-        ids: &[u32],
-        embed: &Tensor,
-        out: &mut Tensor,
-    ) -> Result<(), Box<dyn Error>>;
+    fn embedding_lookup(&self, ids: &[u32], embed: &Tensor, out: &mut Tensor) -> Result<()>;
 }
 
 #[derive(Debug, Error)]
-pub enum OpsError {
+enum OpsError {
     #[error("Tensor shapes do not fit this operation")]
     ShapeMismatch,
 }

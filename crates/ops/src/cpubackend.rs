@@ -1,19 +1,19 @@
 use crate::{Backend, OpsError, RopeTable};
+use anyhow::Result;
 use itertools::izip;
-use std::error::Error;
 use tensor::Tensor;
 
 pub struct CpuBackend {}
 
 impl Backend for CpuBackend {
-    fn add(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), Box<dyn Error>> {
+    fn add(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<()> {
         check_same_shape(&[a, b, out])?;
         izip!(out.as_mut_f32()?, a.as_f32()?, b.as_f32()?)
             .for_each(|(out_val, a_val, b_val)| *out_val = a_val + b_val);
         Ok(())
     }
 
-    fn matmul(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), Box<dyn Error>> {
+    fn matmul(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<()> {
         check_matmul(a, b, out)?;
         let (_, k) = a.dim2()?;
         let a_data = a.as_f32()?;
@@ -30,25 +30,14 @@ impl Backend for CpuBackend {
         Ok(())
     }
 
-    fn hadamard_product(
-        &self,
-        a: &Tensor,
-        b: &Tensor,
-        out: &mut Tensor,
-    ) -> Result<(), Box<dyn Error>> {
+    fn hadamard_product(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<()> {
         check_same_shape(&[a, b, out])?;
         izip!(out.as_mut_f32()?, a.as_f32()?, b.as_f32()?)
             .for_each(|(out_val, a_val, b_val)| *out_val = a_val * b_val);
         Ok(())
     }
 
-    fn rmsnorm(
-        &self,
-        t: &Tensor,
-        w: &Tensor,
-        eps: f32,
-        out: &mut Tensor,
-    ) -> Result<(), Box<dyn Error>> {
+    fn rmsnorm(&self, t: &Tensor, w: &Tensor, eps: f32, out: &mut Tensor) -> Result<()> {
         check_rmsnorm(t, w, out)?;
         let (_, n) = t.dim2()?;
         for (t_row, out_row) in izip!(
@@ -66,13 +55,7 @@ impl Backend for CpuBackend {
         Ok(())
     }
 
-    fn rope(
-        &self,
-        t: &Tensor,
-        table: &RopeTable,
-        m_start: usize,
-        out: &mut Tensor,
-    ) -> Result<(), Box<dyn Error>> {
+    fn rope(&self, t: &Tensor, table: &RopeTable, m_start: usize, out: &mut Tensor) -> Result<()> {
         check_rope(t, table, m_start, out)?;
         let (_, n) = t.dim2()?;
         let half = n / 2;
@@ -92,7 +75,7 @@ impl Backend for CpuBackend {
         Ok(())
     }
 
-    fn softmax(&self, t: &Tensor, out: &mut Tensor) -> Result<(), Box<dyn Error>> {
+    fn softmax(&self, t: &Tensor, out: &mut Tensor) -> Result<()> {
         check_same_shape(&[t, out])?;
         let (_, n) = t.dim2()?;
         if n == 0 {
@@ -114,18 +97,13 @@ impl Backend for CpuBackend {
         Ok(())
     }
 
-    fn silu(&self, t: &Tensor, out: &mut Tensor) -> Result<(), Box<dyn Error>> {
+    fn silu(&self, t: &Tensor, out: &mut Tensor) -> Result<()> {
         check_same_shape(&[t, out])?;
         izip!(out.as_mut_f32()?, t.as_f32()?).for_each(|(y, x)| *y = x / (1.0 + (-x).exp()));
         Ok(())
     }
 
-    fn embedding_lookup(
-        &self,
-        ids: &[u32],
-        embed: &Tensor,
-        out: &mut Tensor,
-    ) -> Result<(), Box<dyn Error>> {
+    fn embedding_lookup(&self, ids: &[u32], embed: &Tensor, out: &mut Tensor) -> Result<()> {
         check_embedding_lookup(ids, embed, out)?;
         let (_, n) = embed.dim2()?;
         if n == 0 {
@@ -141,7 +119,7 @@ impl Backend for CpuBackend {
 }
 
 // Helper functions
-fn check_matmul(a: &Tensor, b: &Tensor, out: &Tensor) -> Result<(), Box<dyn Error>> {
+fn check_matmul(a: &Tensor, b: &Tensor, out: &Tensor) -> Result<()> {
     a.dim2()?;
     b.dim2()?;
     out.dim2()?;
@@ -157,7 +135,7 @@ fn check_matmul(a: &Tensor, b: &Tensor, out: &Tensor) -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-fn check_rmsnorm(t: &Tensor, w: &Tensor, out: &Tensor) -> Result<(), Box<dyn Error>> {
+fn check_rmsnorm(t: &Tensor, w: &Tensor, out: &Tensor) -> Result<()> {
     let (_, n0) = t.dim2()?;
     let n1 = w.dim1()?;
     out.dim2()?;
@@ -168,12 +146,7 @@ fn check_rmsnorm(t: &Tensor, w: &Tensor, out: &Tensor) -> Result<(), Box<dyn Err
     Ok(())
 }
 
-fn check_rope(
-    t: &Tensor,
-    table: &RopeTable,
-    m_start: usize,
-    out: &Tensor,
-) -> Result<(), Box<dyn Error>> {
+fn check_rope(t: &Tensor, table: &RopeTable, m_start: usize, out: &Tensor) -> Result<()> {
     t.dim2()?;
     out.dim2()?;
     check_same_shape(&[&table.cos, &table.sin])?;
@@ -187,7 +160,7 @@ fn check_rope(
     Ok(())
 }
 
-fn check_same_shape(tensors: &[&Tensor]) -> Result<(), Box<dyn Error>> {
+fn check_same_shape(tensors: &[&Tensor]) -> Result<()> {
     for i in 1..tensors.len() {
         if tensors[i - 1].shape() != tensors[i].shape() {
             return Err(OpsError::ShapeMismatch.into());
@@ -196,7 +169,7 @@ fn check_same_shape(tensors: &[&Tensor]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn check_embedding_lookup(ids: &[u32], embed: &Tensor, out: &Tensor) -> Result<(), Box<dyn Error>> {
+fn check_embedding_lookup(ids: &[u32], embed: &Tensor, out: &Tensor) -> Result<()> {
     let (vocab, n) = embed.dim2()?;
     if out.dim2()? != (ids.len(), n) {
         return Err(OpsError::ShapeMismatch.into());
@@ -214,7 +187,7 @@ fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tensor::{Dtype, Storage, TensorError};
+    use tensor::{Dtype, Storage};
     use testutil::{DEFAULT_TOL, assert_close, mmap_f32};
 
     fn mat(shape: [usize; 2], data: &[f32]) -> Tensor {
@@ -235,7 +208,7 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_shape_mismatch(result: Result<(), Box<dyn Error>>) {
+    fn assert_shape_mismatch(result: Result<()>) {
         let err = result.unwrap_err();
         assert!(
             matches!(err.downcast_ref(), Some(OpsError::ShapeMismatch)),
@@ -1420,12 +1393,9 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_read_only(result: Result<(), Box<dyn Error>>) {
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err.downcast_ref(), Some(TensorError::ReadOnly)),
-            "{err:?}"
-        );
+    fn assert_read_only(result: Result<()>) {
+        let msg = result.unwrap_err().to_string().to_lowercase();
+        assert!(msg.contains("read-only"), "{msg}");
     }
 
     /// The first real use in phase 2: token ids gathered out of the mapped
@@ -1542,14 +1512,11 @@ mod tests {
     // with the tensor crate's error instead of panicking on a shape index.
 
     #[track_caller]
-    fn assert_bad_rank(result: Result<(), Box<dyn Error>>, want: usize, got: usize) {
-        let err = result.unwrap_err();
+    fn assert_bad_rank(result: Result<()>, want: usize, got: usize) {
+        let msg = result.unwrap_err().to_string().to_lowercase();
         assert!(
-            matches!(
-                err.downcast_ref(),
-                Some(TensorError::BadRank { expected, actual }) if *expected == want && *actual == got
-            ),
-            "{err:?}"
+            msg.contains(&format!("rank of {want} but got {got}")),
+            "{msg}"
         );
     }
 

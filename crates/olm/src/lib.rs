@@ -1,6 +1,6 @@
+use anyhow::Result;
 use memmap2::Mmap;
 use std::collections::BTreeMap;
-use std::error::Error;
 use std::path::Path;
 use thiserror::Error;
 
@@ -12,7 +12,7 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn new(root_dir: impl AsRef<Path>) -> Result<Self, Box<dyn Error>> {
+    pub fn new(root_dir: impl AsRef<Path>) -> Result<Self> {
         let root = root_dir.as_ref();
         // Get the manifest from root.
         let manifest_file = root.join("manifest.json");
@@ -52,7 +52,7 @@ impl Model {
 }
 
 #[derive(Debug, Error)]
-pub enum OlmError {
+enum OlmError {
     #[error("{name} has unsupported rank of {rank}")]
     RankMismatch { name: String, rank: usize },
     #[error("{0}")]

@@ -1,6 +1,6 @@
+use anyhow::Result;
 use memmap2::Mmap;
 use serde::Deserialize;
-use std::error::Error;
 use std::{
     fmt::{self},
     vec, write,
@@ -52,7 +52,7 @@ pub struct Tensor {
 }
 
 impl Tensor {
-    pub fn new(shape: Vec<usize>, dtype: Dtype, storage: Storage) -> Result<Self, Box<dyn Error>> {
+    pub fn new(shape: Vec<usize>, dtype: Dtype, storage: Storage) -> Result<Self> {
         let shape_size: usize = shape.iter().product();
         let shape_size = shape_size * dtype.size_bytes();
         if shape_size != storage.size_bytes() {
@@ -90,7 +90,7 @@ impl Tensor {
         &self.shape
     }
 
-    pub fn as_f32(&self) -> Result<&[f32], Box<dyn Error>> {
+    pub fn as_f32(&self) -> Result<&[f32]> {
         self.check_dtype(Dtype::F32)?;
         match &self.storage {
             Storage::Heap(v) => Ok(v.as_slice()),
@@ -98,7 +98,7 @@ impl Tensor {
         }
     }
 
-    pub fn as_mut_f32(&mut self) -> Result<&mut [f32], Box<dyn Error>> {
+    pub fn as_mut_f32(&mut self) -> Result<&mut [f32]> {
         self.check_dtype(Dtype::F32)?;
         match &mut self.storage {
             Storage::Heap(v) => Ok(v.as_mut_slice()),
@@ -106,7 +106,7 @@ impl Tensor {
         }
     }
 
-    pub fn dim1(&self) -> Result<usize, Box<dyn Error>> {
+    pub fn dim1(&self) -> Result<usize> {
         if self.shape.len() != 1 {
             return Err(TensorError::BadRank {
                 expected: 1,
@@ -117,7 +117,7 @@ impl Tensor {
         Ok(self.shape[0])
     }
 
-    pub fn dim2(&self) -> Result<(usize, usize), Box<dyn Error>> {
+    pub fn dim2(&self) -> Result<(usize, usize)> {
         if self.shape.len() != 2 {
             return Err(TensorError::BadRank {
                 expected: 2,
@@ -128,7 +128,7 @@ impl Tensor {
         Ok((self.shape[0], self.shape[1]))
     }
 
-    fn check_dtype(&self, dtype: Dtype) -> Result<(), Box<dyn Error>> {
+    fn check_dtype(&self, dtype: Dtype) -> Result<()> {
         if self.dtype != dtype {
             return Err(TensorError::DtypeMismatch {
                 expected: dtype,
@@ -140,7 +140,7 @@ impl Tensor {
     }
 }
 
-fn cast_f32(bytes: &[u8]) -> Result<&[f32], Box<dyn Error>> {
+fn cast_f32(bytes: &[u8]) -> Result<&[f32]> {
     let ptr = bytes.as_ptr().cast::<f32>();
     if !ptr.is_aligned() || bytes.len() % size_of::<f32>() != 0 {
         return Err(TensorError::BadLayout(Dtype::F32).into());
@@ -149,7 +149,7 @@ fn cast_f32(bytes: &[u8]) -> Result<&[f32], Box<dyn Error>> {
 }
 
 #[derive(Debug, Error)]
-pub enum TensorError {
+enum TensorError {
     #[error("Tensor shape needs {shape_size} elements but got {data_size} elements from data")]
     SizeMismatch { shape_size: usize, data_size: usize },
     #[error("Out of bounds access to tensor")]
@@ -180,8 +180,8 @@ mod tests {
     }
 
     #[track_caller]
-    fn tensor_err<T: std::fmt::Debug>(result: Result<T, Box<dyn Error>>) -> TensorError {
-        *result.unwrap_err().downcast().expect("not a TensorError")
+    fn tensor_err<T: std::fmt::Debug>(result: Result<T>) -> TensorError {
+        result.unwrap_err().downcast().expect("not a TensorError")
     }
 
     // Construction

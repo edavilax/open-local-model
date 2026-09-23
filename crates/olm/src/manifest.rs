@@ -1,12 +1,12 @@
+use anyhow::Result;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
-use std::error::Error;
 
 use tensor::Dtype;
 
 use crate::OlmError;
 
-pub fn get_manifest(json: &str) -> Result<Manifest, Box<dyn Error>> {
+pub fn get_manifest(json: &str) -> Result<Manifest> {
     let manifest: Manifest = serde_json::from_str(json)?;
     if manifest.format_version != 1 {
         return Err(

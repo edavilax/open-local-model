@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.104"
 itertools = "0.15.0"
 tensor = { workspace = true }
 thiserror = "2.0.20"
