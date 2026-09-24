@@ -9,6 +9,7 @@ pub mod manifest;
 pub struct Model {
     pub manifest: manifest::Manifest,
     pub tensor_data: BTreeMap<String, tensor::Tensor>,
+    pub tokenizer: tokenizer::Tokenizer,
 }
 
 impl Model {
@@ -22,6 +23,17 @@ impl Model {
                 details: err.to_string(),
             })?;
         let manifest = manifest::get_manifest(&manifest_contents)?;
+        // Build the tokenizer from tokenizer.json and the manifest's settings.
+        let tokenizer_bytes =
+            std::fs::read(root.join("tokenizer.json")).map_err(|err| OlmError::FileReadError {
+                fname: String::from("tokenizer.json"),
+                details: err.to_string(),
+            })?;
+        let tokenizer =
+            tokenizer::Tokenizer::from_bytes(&tokenizer_bytes, manifest.tokenizer.clone())
+                .map_err(|err| OlmError::InvalidTokenizer {
+                    details: err.to_string(),
+                })?;
         // Get the tensor data from manifest.
         let mut tensor_data: BTreeMap<String, tensor::Tensor> = BTreeMap::new();
         let tensor_root = root.join("weights");
@@ -47,6 +59,7 @@ impl Model {
         Ok(Model {
             manifest: manifest,
             tensor_data: tensor_data,
+            tokenizer,
         })
     }
 }
@@ -61,4 +74,6 @@ enum OlmError {
     FileReadError { fname: String, details: String },
     #[error("{name} cannot be converted to a tensor: {details}")]
     TensorReadError { name: String, details: String },
+    #[error("tokenizer.json is not a valid tokenizer: {details}")]
+    InvalidTokenizer { details: String },
 }

@@ -146,7 +146,7 @@ pub struct Manifest {
     pub format_version: u32,
     pub model_family: String,
     pub metadata: Metadata,
-    pub tokenizer: Tokenizer,
+    pub tokenizer: tokenizer::Settings,
     pub hyperparameters: Hyperparameters,
     pub tensors: BTreeMap<String, Tensor>,
 }
@@ -158,18 +158,6 @@ pub struct Metadata {
     #[serde(default)]
     pub source: String,
     pub context_window: usize,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct Tokenizer {
-    #[serde(default)]
-    pub bos_token_id: Option<u32>,
-    pub eos_token_ids: Vec<u32>,
-    #[serde(default)]
-    pub add_bos_token: bool,
-    #[serde(default)]
-    pub chat_template: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]

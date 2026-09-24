@@ -108,6 +108,17 @@ fn loaded_embedding_matches_the_oracle() {
     }
 }
 
+// The tokenizer is built from tokenizer.json plus the manifest's settings.
+#[test]
+fn loaded_tokenizer_matches_the_oracle() {
+    let m = Model::new(toy()).unwrap();
+    let prompt = "The quick brown fox jumps over the lazy dog. 你好 🦀 fn main() {";
+    let ids = load_fixture::<u32>("toy-f32/oracle/token_ids.npy").data;
+    assert_eq!(m.tokenizer.encode(prompt).unwrap(), ids);
+    assert_eq!(m.tokenizer.settings().eos_token_ids, [1021, 1023]);
+    assert!(m.tokenizer.is_eos(1023));
+}
+
 // Mapped storage refuses mutable views; a heap copy would not.
 #[test]
 fn weights_are_mapped_read_only() {
@@ -157,7 +168,19 @@ fn rejects_invalid_manifest() {
 }
 
 // Spec 2: tokenizer.json MUST exist at the root.
-// TODO: Fill in this test when the tokenizer is ready.
+#[test]
+fn rejects_missing_tokenizer_by_name() {
+    let c = Copy::new();
+    fs::remove_file(c.0.join("tokenizer.json")).unwrap();
+    assert!(err(&c.0).contains("tokenizer.json"));
+}
+
+#[test]
+fn rejects_corrupt_tokenizer_by_name() {
+    let c = Copy::new();
+    fs::write(c.0.join("tokenizer.json"), b"{}").unwrap();
+    assert!(err(&c.0).contains("tokenizer.json"));
+}
 
 #[test]
 fn rejects_missing_tensor_file_by_name() {
