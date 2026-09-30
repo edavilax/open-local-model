@@ -66,8 +66,6 @@ impl Model {
 
 #[derive(Debug, Error)]
 enum OlmError {
-    #[error("{name} has unsupported rank of {rank}")]
-    RankMismatch { name: String, rank: usize },
     #[error("{0}")]
     FieldValidation(String),
     #[error("Failed to read {fname}: {details}")]

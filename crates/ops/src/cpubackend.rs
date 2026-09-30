@@ -6,16 +6,15 @@ use tensor::Tensor;
 pub struct CpuBackend {}
 
 impl Backend for CpuBackend {
-    fn add(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<()> {
-        check_same_shape(&[a, b, out])?;
-        izip!(out.as_mut_f32()?, a.as_f32()?, b.as_f32()?)
-            .for_each(|(out_val, a_val, b_val)| *out_val = a_val + b_val);
+    fn add(&self, y: &mut Tensor, x: &Tensor) -> Result<()> {
+        check_same_shape("add x must match y", &[y, x])?;
+        izip!(y.as_mut_f32()?, x.as_f32()?).for_each(|(y_val, x_val)| *y_val += x_val);
         Ok(())
     }
 
     fn matmul(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<()> {
         check_matmul(a, b, out)?;
-        let (_, k) = a.dim2()?;
+        let k = a.dim(1)?;
         let a_data = a.as_f32()?;
         let b_data = b.as_f32()?;
         let out_data = out.as_mut_f32()?;
@@ -30,16 +29,15 @@ impl Backend for CpuBackend {
         Ok(())
     }
 
-    fn hadamard_product(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<()> {
-        check_same_shape(&[a, b, out])?;
-        izip!(out.as_mut_f32()?, a.as_f32()?, b.as_f32()?)
-            .for_each(|(out_val, a_val, b_val)| *out_val = a_val * b_val);
+    fn hadamard_product(&self, y: &mut Tensor, x: &Tensor) -> Result<()> {
+        check_same_shape("hadamard_product x must match y", &[y, x])?;
+        izip!(y.as_mut_f32()?, x.as_f32()?).for_each(|(y_val, x_val)| *y_val *= x_val);
         Ok(())
     }
 
     fn rmsnorm(&self, t: &Tensor, w: &Tensor, eps: f32, out: &mut Tensor) -> Result<()> {
         check_rmsnorm(t, w, out)?;
-        let (_, n) = t.dim2()?;
+        let n = t.dim(1)?;
         for (t_row, out_row) in izip!(
             t.as_f32()?.chunks_exact(n),
             out.as_mut_f32()?.chunks_exact_mut(n)
@@ -55,57 +53,69 @@ impl Backend for CpuBackend {
         Ok(())
     }
 
-    fn rope(&self, t: &Tensor, table: &RopeTable, m_start: usize, out: &mut Tensor) -> Result<()> {
-        check_rope(t, table, m_start, out)?;
-        let (_, n) = t.dim2()?;
-        let half = n / 2;
-        for (out_row, t_row, cos_row, sin_row) in izip!(
-            out.as_mut_f32()?.chunks_exact_mut(n),
-            t.as_f32()?.chunks_exact(n),
-            table.cos.as_f32()?.chunks_exact(half).skip(m_start),
-            table.sin.as_f32()?.chunks_exact(half).skip(m_start),
+    fn rope(&self, y: &mut Tensor, table: &RopeTable, m_start: usize) -> Result<()> {
+        check_rope(y, table, m_start)?;
+        let num_heads = y.dim(1)?;
+        let num_head_elems = y.dim(2)?;
+        let num_head_half = num_head_elems / 2;
+        let num_row_elems = num_heads * num_head_elems;
+        for (y_row, cos_row, sin_row) in izip!(
+            y.as_mut_f32()?.chunks_exact_mut(num_row_elems),
+            table
+                .cos
+                .as_f32()?
+                .chunks_exact(num_head_half)
+                .skip(m_start),
+            table
+                .sin
+                .as_f32()?
+                .chunks_exact(num_head_half)
+                .skip(m_start),
         ) {
-            let (t_left, t_right) = t_row.split_at(half);
-            let (out_left, out_right) = out_row.split_at_mut(half);
-            izip!(out_left, t_left, t_right, cos_row, sin_row)
-                .for_each(|(out_val, l, r, cos, sin)| *out_val = cos * l - sin * r);
-            izip!(out_right, t_left, t_right, cos_row, sin_row)
-                .for_each(|(out_val, l, r, cos, sin)| *out_val = sin * l + cos * r);
-        }
-        Ok(())
-    }
-
-    fn softmax(&self, t: &Tensor, out: &mut Tensor) -> Result<()> {
-        check_same_shape(&[t, out])?;
-        let (_, n) = t.dim2()?;
-        if n == 0 {
-            return Ok(());
-        }
-        for (t_row, out_row) in izip!(
-            t.as_f32()?.chunks_exact(n),
-            out.as_mut_f32()?.chunks_exact_mut(n)
-        ) {
-            let max = t_row.iter().copied().reduce(f32::max).unwrap_or_default();
-            if max == f32::NEG_INFINITY {
-                out_row.fill(f32::NAN);
-            } else {
-                izip!(out_row.iter_mut(), t_row).for_each(|(y, x)| *y = (x - max).exp());
-                let sum: f32 = out_row.iter().sum();
-                out_row.iter_mut().for_each(|y| *y /= sum);
+            for y_head in izip!(y_row.chunks_exact_mut(num_head_elems)) {
+                let (y_left, y_right) = y_head.split_at_mut(num_head_half);
+                izip!(y_left, y_right, cos_row, sin_row).for_each(|(l, r, cos, sin)| {
+                    let l_orig = *l;
+                    *l = *cos * *l - *sin * *r;
+                    *r = *sin * l_orig + *cos * *r;
+                });
             }
         }
         Ok(())
     }
 
-    fn silu(&self, t: &Tensor, out: &mut Tensor) -> Result<()> {
-        check_same_shape(&[t, out])?;
-        izip!(out.as_mut_f32()?, t.as_f32()?).for_each(|(y, x)| *y = x / (1.0 + (-x).exp()));
+    fn softmax(&self, y: &mut Tensor) -> Result<()> {
+        check_rank(y, "softmax y", 2)?;
+        let n = y.dim(1)?;
+        if n == 0 {
+            return Ok(());
+        }
+        for row in y.as_mut_f32()?.chunks_exact_mut(n) {
+            let max = row.iter().copied().reduce(f32::max).unwrap_or_default();
+            if max == f32::NEG_INFINITY {
+                row.fill(f32::NAN);
+            } else {
+                let mut sum: f32 = 0.0;
+                for x in row.iter_mut() {
+                    *x = (*x - max).exp();
+                    sum += *x;
+                }
+                row.iter_mut().for_each(|x| *x /= sum);
+            }
+        }
+        Ok(())
+    }
+
+    fn silu(&self, y: &mut Tensor) -> Result<()> {
+        y.as_mut_f32()?
+            .iter_mut()
+            .for_each(|y| *y = *y / (1.0 + (-1.0 * *y).exp()));
         Ok(())
     }
 
     fn embedding_lookup(&self, ids: &[u32], embed: &Tensor, out: &mut Tensor) -> Result<()> {
         check_embedding_lookup(ids, embed, out)?;
-        let (_, n) = embed.dim2()?;
+        let n = embed.dim(1)?;
         if n == 0 {
             return Ok(());
         }
@@ -120,64 +130,116 @@ impl Backend for CpuBackend {
 
 // Helper functions
 fn check_matmul(a: &Tensor, b: &Tensor, out: &Tensor) -> Result<()> {
-    a.dim2()?;
-    b.dim2()?;
-    out.dim2()?;
-    if a.shape()[1] != b.shape()[1] {
-        return Err(OpsError::ShapeMismatch.into());
+    check_rank(a, "matmul a", 2)?;
+    check_rank(b, "matmul b", 2)?;
+    check_rank(out, "matmul out", 2)?;
+    if a.dim(1)? != b.dim(1)? {
+        return Err(shape_mismatch(
+            "matmul b must be [n, k] with k from a",
+            &[b.dim(0)?, a.dim(1)?],
+            b.shape(),
+        ));
     }
-    if a.shape()[0] != out.shape()[0] {
-        return Err(OpsError::ShapeMismatch.into());
-    }
-    if b.shape()[0] != out.shape()[1] {
-        return Err(OpsError::ShapeMismatch.into());
+    if a.dim(0)? != out.dim(0)? || b.dim(0)? != out.dim(1)? {
+        return Err(shape_mismatch(
+            "matmul out must be [a rows, b rows]",
+            &[a.dim(0)?, b.dim(0)?],
+            out.shape(),
+        ));
     }
     Ok(())
 }
 
 fn check_rmsnorm(t: &Tensor, w: &Tensor, out: &Tensor) -> Result<()> {
-    let (_, n0) = t.dim2()?;
-    let n1 = w.dim1()?;
-    out.dim2()?;
-    check_same_shape(&[t, out])?;
+    check_rank(t, "rmsnorm t", 2)?;
+    check_rank(w, "rmsnorm w", 1)?;
+    let n0 = t.dim(1)?;
+    let n1 = w.dim(0)?;
+    out.dim(1)?;
+    check_same_shape("rmsnorm out must match t", &[t, out])?;
     if n0 != n1 {
-        return Err(OpsError::ShapeMismatch.into());
+        return Err(shape_mismatch(
+            "rmsnorm w must match the row width of t",
+            &[n0],
+            w.shape(),
+        ));
     }
     Ok(())
 }
 
-fn check_rope(t: &Tensor, table: &RopeTable, m_start: usize, out: &Tensor) -> Result<()> {
-    t.dim2()?;
-    out.dim2()?;
-    check_same_shape(&[&table.cos, &table.sin])?;
-    check_same_shape(&[t, out])?;
-    if t.shape()[1] != 2 * table.cos.shape()[1] {
-        return Err(OpsError::ShapeMismatch.into());
+fn check_rope(y: &Tensor, table: &RopeTable, m_start: usize) -> Result<()> {
+    check_rank(y, "rope y", 3)?;
+    check_same_shape("rope table sin must match cos", &[&table.cos, &table.sin])?;
+    if y.dim(2)? != 2 * table.cos.dim(1)? {
+        return Err(shape_mismatch(
+            "rope y head_dim must match the table",
+            &[2 * table.cos.dim(1)?],
+            &[y.dim(2)?],
+        ));
     }
-    if table.cos.shape()[0] < m_start + t.shape()[0] {
-        return Err(OpsError::ShapeMismatch.into());
+    if table.cos.dim(0)? < m_start + y.dim(0)? {
+        return Err(shape_mismatch(
+            "rope positions m_start + rows must fit in the table",
+            &[table.cos.dim(0)?],
+            &[m_start + y.dim(0)?],
+        ));
     }
     Ok(())
 }
 
-fn check_same_shape(tensors: &[&Tensor]) -> Result<()> {
+fn check_same_shape(desc: &str, tensors: &[&Tensor]) -> Result<()> {
     for i in 1..tensors.len() {
         if tensors[i - 1].shape() != tensors[i].shape() {
-            return Err(OpsError::ShapeMismatch.into());
+            return Err(shape_mismatch(
+                desc,
+                tensors[i - 1].shape(),
+                tensors[i].shape(),
+            ));
         }
     }
     Ok(())
 }
 
-fn check_embedding_lookup(ids: &[u32], embed: &Tensor, out: &Tensor) -> Result<()> {
-    let (vocab, n) = embed.dim2()?;
-    if out.dim2()? != (ids.len(), n) {
-        return Err(OpsError::ShapeMismatch.into());
-    }
-    if ids.iter().any(|id| *id as usize >= vocab) {
-        return Err(OpsError::ShapeMismatch.into());
+fn check_rank(x: &Tensor, name: &str, rank: usize) -> Result<()> {
+    if x.shape().len() != rank {
+        return Err(OpsError::RankMismatch {
+            name: name.to_string(),
+            expected: rank,
+            actual: x.shape().len(),
+        }
+        .into());
     }
     Ok(())
+}
+
+fn check_embedding_lookup(ids: &[u32], embed: &Tensor, out: &Tensor) -> Result<()> {
+    check_rank(embed, "embedding_lookup embed", 2)?;
+    check_rank(out, "embedding_lookup out", 2)?;
+    let (vocab, n) = (embed.dim(0)?, embed.dim(1)?);
+    if (out.dim(0)?, out.dim(1)?) != (ids.len(), n) {
+        return Err(shape_mismatch(
+            "embedding_lookup out must be [ids, embed columns]",
+            &[ids.len(), n],
+            out.shape(),
+        ));
+    }
+    if let Some(id) = ids.iter().find(|id| **id as usize >= vocab) {
+        return Err(shape_mismatch(
+            "embedding_lookup token id must be below vocab_size",
+            &[vocab],
+            &[*id as usize],
+        ));
+    }
+    Ok(())
+}
+
+fn shape_mismatch(desc: &str, expected: &[usize], actual: &[usize]) -> anyhow::Error {
+    OpsError::ShapeMismatch {
+        desc: desc.to_string(),
+        expected: expected.to_vec(),
+        actual: actual.to_vec(),
+    }
+    .into()
 }
 
 fn dot_product(a: &[f32], b: &[f32]) -> f32 {
@@ -190,36 +252,35 @@ mod tests {
     use tensor::{Dtype, Storage};
     use testutil::{DEFAULT_TOL, assert_close, mmap_f32};
 
-    fn mat(shape: [usize; 2], data: &[f32]) -> Tensor {
+    fn tensor(shape: &[usize], data: &[f32]) -> Tensor {
         Tensor::new(shape.to_vec(), Dtype::F32, Storage::Heap(data.to_vec())).unwrap()
     }
 
-    fn vector(data: &[f32]) -> Tensor {
-        Tensor::new(vec![data.len()], Dtype::F32, Storage::Heap(data.to_vec())).unwrap()
+    fn mapped(shape: &[usize], data: &[f32]) -> Tensor {
+        Tensor::new(shape.to_vec(), Dtype::F32, Storage::Mmap(mmap_f32(data))).unwrap()
     }
 
     fn data(t: &Tensor) -> Vec<f32> {
         t.as_f32().unwrap().to_vec()
     }
 
+    // Row `i` of dimension 0, with the trailing dimensions flattened.
     fn row(t: &Tensor, i: usize) -> &[f32] {
-        let n = t.shape()[1];
+        let n: usize = t.shape()[1..].iter().product();
         &t.as_f32().unwrap()[i * n..(i + 1) * n]
     }
 
     #[track_caller]
-    fn assert_shape_mismatch(result: Result<()>) {
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err.downcast_ref(), Some(OpsError::ShapeMismatch)),
-            "{err:?}"
-        );
+    fn err(result: Result<()>) -> anyhow::Error {
+        match result {
+            Ok(()) => panic!("succeeded, but it should have failed"),
+            Err(e) => e,
+        }
     }
 
-    /// A[2,3].
     fn a_2x3() -> Tensor {
-        mat(
-            [2, 3],
+        tensor(
+            &[2, 3],
             &[
                 1.5, -2.0, 0.0, // row 0
                 -0.5, 3.0, -1.5, // row 1
@@ -227,11 +288,10 @@ mod tests {
         )
     }
 
-    /// B[4,3]. Stored in the [n, k] layout `matmul` expects, i.e. each row
-    /// here is a column of the mathematical B — no transpose is performed.
+    // Stored [n, k]: each row is a column of the mathematical B.
     fn b_4x3() -> Tensor {
-        mat(
-            [4, 3],
+        tensor(
+            &[4, 3],
             &[
                 4.0, 0.0, -2.0, // row 0
                 -1.0, 2.5, 0.0, // row 1
@@ -241,12 +301,24 @@ mod tests {
         )
     }
 
+    fn input_4x8() -> Tensor {
+        tensor(
+            &[4, 8],
+            &[
+                0.497, -0.138, 0.648, 1.523, -0.234, 0.812, -0.345, 0.781, // row 0
+                -0.112, 0.452, 1.104, -0.673, 0.912, -0.543, 0.321, -0.801, // row 1
+                0.219, -0.456, -0.123, 0.654, -0.987, 0.314, -0.876, 0.543, // row 2
+                0.765, -0.432, 0.198, -0.541, 0.632, -0.879, 0.111, -0.222, // row 3
+            ],
+        )
+    }
+
+    // matmul
+
     #[test]
     fn matmul_valid() {
         let mut out = Tensor::zeros_f32(vec![2, 4]);
         CpuBackend {}.matmul(&a_2x3(), &b_4x3(), &mut out).unwrap();
-
-        assert_eq!(out.shape(), &[2, 4]);
         assert_close(
             &data(&out),
             &[
@@ -259,49 +331,37 @@ mod tests {
 
     #[test]
     fn matmul_single_row() {
-        let a = mat([1, 3], &[1.5, -2.0, 0.0]);
+        let a = tensor(&[1, 3], &[1.5, -2.0, 0.0]);
         let mut out = Tensor::zeros_f32(vec![1, 4]);
         CpuBackend {}.matmul(&a, &b_4x3(), &mut out).unwrap();
-
-        assert_eq!(out.shape(), &[1, 4]);
         assert_close(&data(&out), &[6.0, -6.5, 6.0, 2.0], DEFAULT_TOL);
     }
 
     #[test]
     fn matmul_single_column() {
-        let b = mat([1, 3], &[4.0, 0.0, -2.0]);
+        let b = tensor(&[1, 3], &[4.0, 0.0, -2.0]);
         let mut out = Tensor::zeros_f32(vec![2, 1]);
         CpuBackend {}.matmul(&a_2x3(), &b, &mut out).unwrap();
-
-        assert_eq!(out.shape(), &[2, 1]);
         assert_close(&data(&out), &[6.0, 1.0], DEFAULT_TOL);
     }
 
-    /// k = 1 degenerates the dot product to a single multiply.
     #[test]
     fn matmul_k_of_one() {
-        let a = mat([2, 1], &[3.0, -2.0]);
-        let b = mat([3, 1], &[1.0, 0.5, -4.0]);
+        let a = tensor(&[2, 1], &[3.0, -2.0]);
+        let b = tensor(&[3, 1], &[1.0, 0.5, -4.0]);
         let mut out = Tensor::zeros_f32(vec![2, 3]);
         CpuBackend {}.matmul(&a, &b, &mut out).unwrap();
-
         assert_close(
             &data(&out),
-            &[
-                3.0, 1.5, -12.0, // row 0
-                -2.0, -1.0, 8.0, // row 1
-            ],
+            &[3.0, 1.5, -12.0, -2.0, -1.0, 8.0],
             DEFAULT_TOL,
         );
     }
 
-    /// Every element of `out` must be written, not accumulated into. A stale
-    /// value surviving here would mean the loop skipped a cell.
     #[test]
     fn matmul_overwrites_every_element_of_out() {
-        let mut out = mat([2, 4], &[999.0; 8]);
+        let mut out = tensor(&[2, 4], &[999.0; 8]);
         CpuBackend {}.matmul(&a_2x3(), &b_4x3(), &mut out).unwrap();
-
         assert_close(
             &data(&out),
             &[6.0, -6.5, 6.0, 2.0, 1.0, 8.0, -10.5, 6.5],
@@ -309,37 +369,85 @@ mod tests {
         );
     }
 
-    // Rejection cases. Each one breaks exactly one shape rule and satisfies the
-    // rest, so the error can only come from the check under test.
-    //
-    // Shape/data disagreement cannot reach an op: `Tensor::new` rejects it
-    // (tested in the tensor crate). Wrong rank can; see the rank tests below.
-
     #[test]
-    fn matmul_rejects_k_mismatch() {
-        let b = Tensor::zeros_f32(vec![4, 7]);
-        let mut out = Tensor::zeros_f32(vec![2, 4]);
-        assert_shape_mismatch(CpuBackend {}.matmul(&a_2x3(), &b, &mut out));
+    fn matmul_rejects_shape_mismatches() {
+        let cases = [
+            (Tensor::zeros_f32(vec![4, 7]), Tensor::zeros_f32(vec![2, 4])), // k
+            (b_4x3(), Tensor::zeros_f32(vec![5, 4])),                       // out rows
+            (b_4x3(), Tensor::zeros_f32(vec![2, 9])),                       // out cols
+        ];
+        for (b, mut out) in cases {
+            let e = err(CpuBackend {}.matmul(&a_2x3(), &b, &mut out));
+            assert!(
+                matches!(e.downcast_ref(), Some(OpsError::ShapeMismatch { .. })),
+                "{e}"
+            );
+        }
     }
 
     #[test]
-    fn matmul_rejects_wrong_out_rows() {
-        let mut out = Tensor::zeros_f32(vec![5, 4]);
-        assert_shape_mismatch(CpuBackend {}.matmul(&a_2x3(), &b_4x3(), &mut out));
+    fn matmul_rejects_rank_1() {
+        let v = tensor(&[3], &[1.0, 2.0, 3.0]);
+        let e = err(CpuBackend {}.matmul(&v, &b_4x3(), &mut Tensor::zeros_f32(vec![2, 4])));
+        assert!(
+            matches!(
+                e.downcast_ref(),
+                Some(OpsError::RankMismatch { actual: 1, .. })
+            ),
+            "{e}"
+        );
+        let e = err(CpuBackend {}.matmul(&a_2x3(), &b_4x3(), &mut Tensor::zeros_f32(vec![8])));
+        assert!(
+            matches!(
+                e.downcast_ref(),
+                Some(OpsError::RankMismatch { actual: 1, .. })
+            ),
+            "{e}"
+        );
     }
 
+    // A [T, heads, head_dim] buffer that was never reshaped back. Each shape
+    // below lines up with the other operands in its first two dimensions.
     #[test]
-    fn matmul_rejects_wrong_out_cols() {
-        let mut out = Tensor::zeros_f32(vec![2, 9]);
-        assert_shape_mismatch(CpuBackend {}.matmul(&a_2x3(), &b_4x3(), &mut out));
+    fn matmul_rejects_rank_3() {
+        let a3 = Tensor::zeros_f32(vec![2, 3, 1]);
+        let e = err(CpuBackend {}.matmul(&a3, &b_4x3(), &mut Tensor::zeros_f32(vec![2, 4])));
+        assert!(
+            matches!(
+                e.downcast_ref(),
+                Some(OpsError::RankMismatch { actual: 3, .. })
+            ),
+            "{e}"
+        );
+
+        let b3 = Tensor::zeros_f32(vec![4, 3, 1]);
+        let e = err(CpuBackend {}.matmul(&a_2x3(), &b3, &mut Tensor::zeros_f32(vec![2, 4])));
+        assert!(
+            matches!(
+                e.downcast_ref(),
+                Some(OpsError::RankMismatch { actual: 3, .. })
+            ),
+            "{e}"
+        );
+
+        let e =
+            err(CpuBackend {}.matmul(&a_2x3(), &b_4x3(), &mut Tensor::zeros_f32(vec![2, 4, 1])));
+        assert!(
+            matches!(
+                e.downcast_ref(),
+                Some(OpsError::RankMismatch { actual: 3, .. })
+            ),
+            "{e}"
+        );
     }
+
+    // rmsnorm
 
     #[test]
     fn rmsnorm_valid() {
-        let t = a_2x3();
-        let w = vector(&[1.0, 2.0, 0.5]);
+        let w = tensor(&[3], &[1.0, 2.0, 0.5]);
         let mut out = Tensor::zeros_f32(vec![2, 3]);
-        CpuBackend {}.rmsnorm(&t, &w, 1e-6, &mut out).unwrap();
+        CpuBackend {}.rmsnorm(&a_2x3(), &w, 1e-6, &mut out).unwrap();
         assert_close(
             &data(&out),
             &[
@@ -350,151 +458,135 @@ mod tests {
         );
     }
 
-    /// With an all-ones weight the op is pure normalization, which isolates
-    /// the RMS computation from the per-feature scale.
-    #[test]
-    fn rmsnorm_identity_weight() {
-        let t = a_2x3();
-        let w = vector(&[1.0; 3]);
-        let mut out = Tensor::zeros_f32(vec![2, 3]);
-        CpuBackend {}.rmsnorm(&t, &w, 1e-6, &mut out).unwrap();
-        assert_close(
-            &data(&out),
-            &[
-                1.0392302, -1.3856403, 0.0, // row 0
-                -0.2553769, 1.5322616, -0.7661308, // row 1
-            ],
-            DEFAULT_TOL,
-        );
-    }
-
-    /// The defining property: after normalization each row has RMS 1. This
-    /// holds for any input, so it catches a wrong divisor without depending
-    /// on hand-computed expectations.
     #[test]
     fn rmsnorm_output_rows_have_unit_rms() {
-        let t = a_2x3();
-        let w = vector(&[1.0; 3]);
+        let w = tensor(&[3], &[1.0; 3]);
         let mut out = Tensor::zeros_f32(vec![2, 3]);
-        CpuBackend {}.rmsnorm(&t, &w, 1e-6, &mut out).unwrap();
-
+        CpuBackend {}.rmsnorm(&a_2x3(), &w, 1e-6, &mut out).unwrap();
         for i in 0..2 {
-            let row = row(&out, i);
-            let rms = (row.iter().map(|x| x * x).sum::<f32>() / row.len() as f32).sqrt();
+            let r = row(&out, i);
+            let rms = (r.iter().map(|x| x * x).sum::<f32>() / r.len() as f32).sqrt();
             assert_close(&[rms], &[1.0], DEFAULT_TOL);
         }
     }
 
-    /// `eps` exists so an all-zero row divides by `sqrt(eps)` instead of 0.
-    /// Without it this row would be 0/0 = NaN.
+    // Without eps this row would be 0/0.
     #[test]
     fn rmsnorm_zero_row_does_not_produce_nan() {
-        let t = mat(
-            [2, 3],
-            &[
-                0.0, 0.0, 0.0, // row 0 — degenerate
-                3.0, 4.0, 0.0, // row 1
-            ],
-        );
-        let w = vector(&[1.0; 3]);
+        let x = tensor(&[2, 3], &[0.0, 0.0, 0.0, 3.0, 4.0, 0.0]);
+        let w = tensor(&[3], &[1.0; 3]);
         let mut out = Tensor::zeros_f32(vec![2, 3]);
-        CpuBackend {}.rmsnorm(&t, &w, 1e-6, &mut out).unwrap();
-
-        assert!(
-            out.as_f32().unwrap().iter().all(|x| x.is_finite()),
-            "got {:?}",
-            data(&out)
-        );
+        CpuBackend {}.rmsnorm(&x, &w, 1e-6, &mut out).unwrap();
         assert_close(
             &data(&out),
-            &[
-                0.0, 0.0, 0.0, // row 0
-                1.0392304, 1.3856406, 0.0, // row 1
-            ],
+            &[0.0, 0.0, 0.0, 1.0392304, 1.3856406, 0.0],
             DEFAULT_TOL,
         );
     }
 
     #[test]
     fn rmsnorm_single_row() {
-        let t = mat([1, 3], &[1.5, -2.0, 0.0]);
-        let w = vector(&[1.0, 2.0, 0.5]);
+        let x = tensor(&[1, 3], &[1.5, -2.0, 0.0]);
+        let w = tensor(&[3], &[1.0, 2.0, 0.5]);
         let mut out = Tensor::zeros_f32(vec![1, 3]);
-        CpuBackend {}.rmsnorm(&t, &w, 1e-6, &mut out).unwrap();
+        CpuBackend {}.rmsnorm(&x, &w, 1e-6, &mut out).unwrap();
         assert_close(&data(&out), &[1.0392302, -2.7712806, 0.0], DEFAULT_TOL);
     }
 
     #[test]
     fn rmsnorm_overwrites_every_element_of_out() {
-        let t = a_2x3();
-        let w = vector(&[1.0, 2.0, 0.5]);
-        let mut out = mat([2, 3], &[999.0; 6]);
-        CpuBackend {}.rmsnorm(&t, &w, 1e-6, &mut out).unwrap();
+        let w = tensor(&[3], &[1.0, 2.0, 0.5]);
+        let mut out = tensor(&[2, 3], &[999.0; 6]);
+        CpuBackend {}.rmsnorm(&a_2x3(), &w, 1e-6, &mut out).unwrap();
         assert_close(
             &data(&out),
-            &[
-                1.0392302, -2.7712806, 0.0, // row 0
-                -0.2553769, 3.064523, -0.3830654, // row 1
-            ],
-            DEFAULT_TOL,
-        );
-    }
-
-    // Rejection cases. Each one breaks exactly one shape rule and satisfies the
-    // rest, so the error can only come from the check under test.
-
-    #[test]
-    fn rmsnorm_rejects_weight_length_mismatch() {
-        let w = vector(&[1.0; 7]); // must match t's last dim, 3
-        let mut out = Tensor::zeros_f32(vec![2, 3]);
-        assert_shape_mismatch(CpuBackend {}.rmsnorm(&a_2x3(), &w, 1e-6, &mut out));
-    }
-
-    #[test]
-    fn rmsnorm_rejects_out_shape_mismatch() {
-        let w = vector(&[1.0; 3]);
-        let mut out = Tensor::zeros_f32(vec![3, 2]); // same element count, wrong shape
-        assert_shape_mismatch(CpuBackend {}.rmsnorm(&a_2x3(), &w, 1e-6, &mut out));
-    }
-
-    #[test]
-    fn rope_valid_using_vector() {
-        const HEAD_DIM: usize = 4;
-        let t = mat([1, HEAD_DIM], &[0.497, -0.138, 0.648, 1.523]);
-        let mut out = Tensor::zeros_f32(vec![1, HEAD_DIM]);
-        let table = RopeTable::new(HEAD_DIM, 10, 10000.0);
-        // M = 0
-        CpuBackend {}.rope(&t, &table, 0, &mut out).unwrap();
-        assert_close(&data(&out), &[0.497, -0.138, 0.648, 1.523], DEFAULT_TOL);
-        // M = 1
-        CpuBackend {}.rope(&t, &table, 1, &mut out).unwrap();
-        assert_close(
-            &data(&out),
-            &[-0.276743, -0.153223, 0.768327, 1.521544],
-            DEFAULT_TOL,
-        );
-        // M = 2
-        CpuBackend {}.rope(&t, &table, 2, &mut out).unwrap();
-        assert_close(
-            &data(&out),
-            &[-0.796050, -0.168430, 0.182258, 1.519936],
-            DEFAULT_TOL,
-        );
-        // M = 3
-        CpuBackend {}.rope(&t, &table, 3, &mut out).unwrap();
-        assert_close(
-            &data(&out),
-            &[-0.583472, -0.183621, -0.571378, 1.518175],
+            &[1.0392302, -2.7712806, 0.0, -0.2553769, 3.064523, -0.3830654],
             DEFAULT_TOL,
         );
     }
 
     #[test]
-    fn rope_valid_using_matrix() {
-        const HEAD_DIM: usize = 6;
-        const NUM_ROWS: usize = 5;
-        let t = mat(
-            [NUM_ROWS, HEAD_DIM],
+    fn rmsnorm_rejects_shape_mismatches() {
+        let e = err(CpuBackend {}.rmsnorm(
+            &a_2x3(),
+            &tensor(&[7], &[1.0; 7]),
+            1e-6,
+            &mut Tensor::zeros_f32(vec![2, 3]),
+        ));
+        assert!(
+            matches!(e.downcast_ref(), Some(OpsError::ShapeMismatch { .. })),
+            "{e}"
+        );
+
+        let e = err(CpuBackend {}.rmsnorm(
+            &a_2x3(),
+            &tensor(&[3], &[1.0; 3]),
+            1e-6,
+            &mut Tensor::zeros_f32(vec![3, 2]),
+        ));
+        assert!(
+            matches!(e.downcast_ref(), Some(OpsError::ShapeMismatch { .. })),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn rmsnorm_rejects_wrong_rank() {
+        let w = tensor(&[1, 3], &[1.0; 3]);
+        let e = err(CpuBackend {}.rmsnorm(&a_2x3(), &w, 1e-6, &mut Tensor::zeros_f32(vec![2, 3])));
+        assert!(
+            matches!(
+                e.downcast_ref(),
+                Some(OpsError::RankMismatch { actual: 2, .. })
+            ),
+            "{e}"
+        );
+
+        let v = tensor(&[3], &[1.0, 2.0, 3.0]);
+        let w = tensor(&[3], &[1.0; 3]);
+        let e = err(CpuBackend {}.rmsnorm(&v, &w, 1e-6, &mut Tensor::zeros_f32(vec![3])));
+        assert!(
+            matches!(
+                e.downcast_ref(),
+                Some(OpsError::RankMismatch { actual: 1, .. })
+            ),
+            "{e}"
+        );
+    }
+
+    // rope: input is [rows, heads, head_dim]
+
+    fn roped(x: &Tensor, table: &RopeTable, m_start: usize) -> Tensor {
+        let mut y = tensor(x.shape(), &data(x));
+        CpuBackend {}.rope(&mut y, table, m_start).unwrap();
+        y
+    }
+
+    fn head(t: &Tensor, i: usize, h: usize) -> &[f32] {
+        let (n_heads, head_dim) = (t.shape()[1], t.shape()[2]);
+        let start = (i * n_heads + h) * head_dim;
+        &t.as_f32().unwrap()[start..start + head_dim]
+    }
+
+    #[test]
+    fn rope_valid_at_each_position() {
+        let x = tensor(&[1, 1, 4], &[0.497, -0.138, 0.648, 1.523]);
+        let table = RopeTable::new(4, 10, 10000.0);
+        let cases = [
+            (0, [0.497, -0.138, 0.648, 1.523]),
+            (1, [-0.276743, -0.153223, 0.768327, 1.521544]),
+            (2, [-0.796050, -0.168430, 0.182258, 1.519936]),
+            (3, [-0.583472, -0.183621, -0.571378, 1.518175]),
+        ];
+        for (m, expected) in cases {
+            assert_close(&data(&roped(&x, &table, m)), &expected, DEFAULT_TOL);
+        }
+    }
+
+    #[test]
+    fn rope_valid_over_rows() {
+        let x = tensor(
+            &[5, 1, 6],
             &[
                 0.497, -0.138, 0.648, 1.523, -0.234, 0.812, // m = 0
                 -0.345, 0.781, -0.112, 0.452, 1.104, -0.673, // m = 1
@@ -503,11 +595,9 @@ mod tests {
                 0.765, -0.432, 0.198, -0.541, 0.632, -0.879, // m = 4
             ],
         );
-        let mut out = Tensor::zeros_f32(vec![NUM_ROWS, HEAD_DIM]);
-        let table = RopeTable::new(HEAD_DIM, 10, 10000.0);
-        CpuBackend {}.rope(&t, &table, 0, &mut out).unwrap();
+        let table = RopeTable::new(6, 10, 10000.0);
         assert_close(
-            &data(&out),
+            &data(&roped(&x, &table, 0)),
             &[
                 0.497,
                 -0.138,
@@ -544,184 +634,183 @@ mod tests {
         );
     }
 
-    /// [4, 8] input shared by the rope property tests below.
-    fn rope_input_4x8() -> Tensor {
-        mat(
-            [4, 8],
-            &[
-                0.497, -0.138, 0.648, 1.523, -0.234, 0.812, -0.345, 0.781, // row 0
-                -0.112, 0.452, 1.104, -0.673, 0.912, -0.543, 0.321, -0.801, // row 1
-                0.219, -0.456, -0.123, 0.654, -0.987, 0.314, -0.876, 0.543, // row 2
-                0.765, -0.432, 0.198, -0.541, 0.632, -0.879, 0.111, -0.222, // row 3
-            ],
-        )
-    }
-
-    /// Copies row `i` of a matrix into its own [1, cols] matrix.
-    fn row_matrix(t: &Tensor, i: usize) -> Tensor {
-        mat([1, t.shape()[1]], row(t, i))
-    }
-
-    /// Prefill and decode must agree: rotating several rows at once from
-    /// `m_start` gives the same result as rotating each row alone at its own
-    /// position. Phase 4's KV cache relies on this, and it catches mixing up
-    /// the input row `i` with the table row `m`. The existing tests only
-    /// exercise multi-row input at `m_start = 0`, where `i == m`.
+    // Every head in row i sits at position m_start + i. Rotating the whole
+    // tensor must equal rotating each head alone at that position.
     #[test]
-    fn rope_multi_row_matches_per_row_decode() {
-        let t = rope_input_4x8();
+    fn rope_matches_rotating_each_head_alone() {
+        let values: Vec<f32> = (0..72)
+            .map(|i| ((i * 37 % 23) as f32 - 11.0) / 7.0)
+            .collect();
+        let x = tensor(&[3, 3, 8], &values);
         let table = RopeTable::new(8, 16, 10000.0);
-        let m_start = 3;
-        let mut batched = Tensor::zeros_f32(vec![4, 8]);
-        CpuBackend {}
-            .rope(&t, &table, m_start, &mut batched)
-            .unwrap();
-
-        for i in 0..4 {
-            let mut single = Tensor::zeros_f32(vec![1, 8]);
-            CpuBackend {}
-                .rope(&row_matrix(&t, i), &table, m_start + i, &mut single)
-                .unwrap();
-            assert_close(row(&batched, i), &data(&single), DEFAULT_TOL);
-        }
-    }
-
-    /// Each (j, j + n/2) pair is rotated as a 2-D vector, so its length must
-    /// not change. This is also a convention check: interleaved RoPE preserves
-    /// (2j, 2j + 1) pairs instead, and would fail here.
-    #[test]
-    fn rope_preserves_pair_lengths() {
-        let t = rope_input_4x8();
-        let table = RopeTable::new(8, 16, 10000.0);
-        let mut out = Tensor::zeros_f32(vec![4, 8]);
-        CpuBackend {}.rope(&t, &table, 9, &mut out).unwrap();
-
-        for i in 0..4 {
-            let (x, y) = (row(&t, i), row(&out, i));
-            for j in 0..4 {
-                let before = x[j] * x[j] + x[j + 4] * x[j + 4];
-                let after = y[j] * y[j] + y[j + 4] * y[j + 4];
-                assert_close(&[after], &[before], DEFAULT_TOL);
+        let m_start = 2;
+        let all = roped(&x, &table, m_start);
+        for i in 0..3 {
+            for h in 0..3 {
+                let alone = roped(&tensor(&[1, 1, 8], head(&x, i, h)), &table, m_start + i);
+                assert_close(head(&all, i, h), &data(&alone), DEFAULT_TOL);
             }
         }
     }
 
-    /// The point of RoPE: the dot product of a rotated query and key depends
-    /// only on the distance between their positions.
+    // One-hot at head 1, index 1 (flat 9). Its pair is flat 13, inside the
+    // same head. Pairing across the whole 16-wide row would touch flat 1.
     #[test]
-    fn rope_dot_product_depends_only_on_relative_position() {
-        let base = rope_input_4x8();
-        let (q, k) = (row_matrix(&base, 0), row_matrix(&base, 1));
-        let table = RopeTable::new(8, 16, 10000.0);
-
-        let rotated_dot = |m_q: usize, m_k: usize| -> f32 {
-            let mut rq = Tensor::zeros_f32(vec![1, 8]);
-            let mut rk = Tensor::zeros_f32(vec![1, 8]);
-            CpuBackend {}.rope(&q, &table, m_q, &mut rq).unwrap();
-            CpuBackend {}.rope(&k, &table, m_k, &mut rk).unwrap();
-            dot_product(row(&rq, 0), row(&rk, 0))
-        };
-
-        // Every pair here is 2 positions apart.
-        let reference = rotated_dot(2, 0);
-        assert_close(&[rotated_dot(5, 3)], &[reference], DEFAULT_TOL);
-        assert_close(&[rotated_dot(13, 11)], &[reference], DEFAULT_TOL);
-        // A different distance must give a different result, or the checks
-        // above prove nothing.
-        assert!((rotated_dot(3, 0) - reference).abs() > 1e-3);
+    fn rope_keeps_pairs_inside_their_head() {
+        let mut values = [0.0; 16];
+        values[9] = 1.0;
+        let x = tensor(&[1, 2, 8], &values);
+        let table = RopeTable::new(8, 4, 10000.0);
+        let (c, s) = (row(&table.cos, 1)[1], row(&table.sin, 1)[1]);
+        let mut expected = [0.0; 16];
+        expected[9] = c;
+        expected[13] = s;
+        assert_close(&data(&roped(&x, &table, 1)), &expected, DEFAULT_TOL);
     }
 
-    /// Rotate-half pairs element j with j + n/2. A one-hot input at index 1
-    /// may only produce output at indices 1 and 5; interleaved RoPE would
-    /// produce output at 0 and 1 instead.
     #[test]
     fn rope_one_hot_pairs_j_with_j_plus_half() {
-        let mut input = [0.0; 8];
-        input[1] = 1.0;
-        let t = mat([1, 8], &input);
+        let mut values = [0.0; 8];
+        values[1] = 1.0;
+        let x = tensor(&[1, 1, 8], &values);
         let table = RopeTable::new(8, 4, 10000.0);
-        let mut out = Tensor::zeros_f32(vec![1, 8]);
-        CpuBackend {}.rope(&t, &table, 1, &mut out).unwrap();
-
-        // Table row 1, column 1: pair 1 at position 1.
         let (c, s) = (row(&table.cos, 1)[1], row(&table.sin, 1)[1]);
         assert_close(
-            &data(&out),
+            &data(&roped(&x, &table, 1)),
             &[0.0, c, 0.0, 0.0, 0.0, s, 0.0, 0.0],
             DEFAULT_TOL,
         );
     }
 
     #[test]
-    fn rope_overwrites_every_element_of_out() {
-        let t = rope_input_4x8();
+    fn rope_preserves_pair_lengths() {
+        let x = tensor(&[2, 2, 8], &data(&input_4x8()));
         let table = RopeTable::new(8, 16, 10000.0);
-        let mut expected = Tensor::zeros_f32(vec![4, 8]);
-        CpuBackend {}.rope(&t, &table, 2, &mut expected).unwrap();
-
-        let mut out = mat([4, 8], &[999.0; 32]);
-        CpuBackend {}.rope(&t, &table, 2, &mut out).unwrap();
-        assert_close(&data(&out), &data(&expected), DEFAULT_TOL);
+        let y = roped(&x, &table, 9);
+        for i in 0..2 {
+            for h in 0..2 {
+                let (a, b) = (head(&x, i, h), head(&y, i, h));
+                for j in 0..4 {
+                    let before = a[j] * a[j] + a[j + 4] * a[j + 4];
+                    let after = b[j] * b[j] + b[j + 4] * b[j + 4];
+                    assert_close(&[after], &[before], DEFAULT_TOL);
+                }
+            }
+        }
     }
 
-    /// Decoding at the last table row is allowed: `m_start + rows == max_seq`.
-    /// Pins the table bound as inclusive of its last row.
+    #[test]
+    fn rope_dot_product_depends_only_on_relative_position() {
+        let q = tensor(&[1, 1, 8], row(&input_4x8(), 0));
+        let k = tensor(&[1, 1, 8], row(&input_4x8(), 1));
+        let table = RopeTable::new(8, 16, 10000.0);
+        let dot = |m_q, m_k| {
+            dot_product(
+                &data(&roped(&q, &table, m_q)),
+                &data(&roped(&k, &table, m_k)),
+            )
+        };
+
+        let reference = dot(2, 0);
+        assert_close(&[dot(5, 3)], &[reference], DEFAULT_TOL);
+        assert_close(&[dot(13, 11)], &[reference], DEFAULT_TOL);
+        assert!((dot(3, 0) - reference).abs() > 1e-3);
+    }
+
+    // q and k share one table but have different head counts.
+    #[test]
+    fn rope_accepts_any_head_count() {
+        let table = RopeTable::new(8, 4, 10000.0);
+        for n_heads in [1, 2, 3, 4] {
+            let mut y = Tensor::zeros_f32(vec![2, n_heads, 8]);
+            CpuBackend {}.rope(&mut y, &table, 0).unwrap();
+        }
+    }
+
     #[test]
     fn rope_accepts_last_table_row() {
-        let t = row_matrix(&rope_input_4x8(), 0);
         let table = RopeTable::new(8, 7, 10000.0);
-        let mut out = Tensor::zeros_f32(vec![1, 8]);
-        CpuBackend {}.rope(&t, &table, 6, &mut out).unwrap();
-        assert!(out.as_f32().unwrap().iter().any(|x| *x != 0.0));
+        let y = roped(&tensor(&[1, 1, 8], row(&input_4x8(), 0)), &table, 6);
+        assert!(y.as_f32().unwrap().iter().any(|v| *v != 0.0));
     }
 
-    // Rejection cases. Each one breaks exactly one shape rule and satisfies the
-    // rest, so the error can only come from the check under test.
-
-    /// The case you'll actually hit in practice: decode runs past `max_seq`.
     #[test]
     fn rope_rejects_positions_past_table_end() {
-        let t = row_matrix(&rope_input_4x8(), 0);
         let table = RopeTable::new(8, 7, 10000.0);
-        let mut out = Tensor::zeros_f32(vec![1, 8]);
-        assert_shape_mismatch(CpuBackend {}.rope(&t, &table, 7, &mut out)); // table rows are 0..=6
+        let e = err(CpuBackend {}.rope(&mut Tensor::zeros_f32(vec![1, 1, 8]), &table, 7));
+        assert!(
+            matches!(e.downcast_ref(), Some(OpsError::ShapeMismatch { .. })),
+            "{e}"
+        );
+        let e = err(CpuBackend {}.rope(&mut Tensor::zeros_f32(vec![3, 1, 8]), &table, 5));
+        assert!(
+            matches!(e.downcast_ref(), Some(OpsError::ShapeMismatch { .. })),
+            "{e}"
+        );
     }
 
+    // 8 heads of width 6 against a table for width 8: a check against the
+    // head count instead of the head width would pass.
     #[test]
     fn rope_rejects_head_dim_table_mismatch() {
-        let t = Tensor::zeros_f32(vec![1, 6]);
         let table = RopeTable::new(8, 7, 10000.0);
-        let mut out = Tensor::zeros_f32(vec![1, 6]);
-        assert_shape_mismatch(CpuBackend {}.rope(&t, &table, 0, &mut out));
+        let e = err(CpuBackend {}.rope(&mut Tensor::zeros_f32(vec![1, 8, 6]), &table, 0));
+        assert!(
+            matches!(e.downcast_ref(), Some(OpsError::ShapeMismatch { .. })),
+            "{e}"
+        );
     }
 
     #[test]
-    fn rope_rejects_out_shape_mismatch() {
-        let t = row_matrix(&rope_input_4x8(), 0); // [1, 8]
-        let table = RopeTable::new(8, 7, 10000.0);
-        let mut out = Tensor::zeros_f32(vec![8, 1]); // same element count, wrong shape
-        assert_shape_mismatch(CpuBackend {}.rope(&t, &table, 0, &mut out));
+    fn rope_rejects_wrong_rank() {
+        let table = RopeTable::new(8, 4, 10000.0);
+        let e = err(CpuBackend {}.rope(&mut Tensor::zeros_f32(vec![1, 8]), &table, 0));
+        assert!(
+            matches!(
+                e.downcast_ref(),
+                Some(OpsError::RankMismatch { actual: 2, .. })
+            ),
+            "{e}"
+        );
+        let e = err(CpuBackend {}.rope(&mut Tensor::zeros_f32(vec![8]), &table, 0));
+        assert!(
+            matches!(
+                e.downcast_ref(),
+                Some(OpsError::RankMismatch { actual: 1, .. })
+            ),
+            "{e}"
+        );
     }
 
     #[test]
-    fn softmax_valid_using_vector() {
-        let t = mat([1, 3], &[1.0, 2.0, 3.0]);
-        let mut out = Tensor::zeros_f32(vec![1, 3]);
-        CpuBackend {}.softmax(&t, &mut out).unwrap();
-        assert_eq!(out.shape(), &[1, 3]);
+    fn rope_refuses_a_mapped_tensor() {
+        let table = RopeTable::new(8, 4, 10000.0);
+        let e = err(CpuBackend {}.rope(&mut mapped(&[1, 1, 8], &[0.0; 8]), &table, 0));
+        assert!(e.to_string().contains("read-only"), "{e}");
+    }
+
+    // softmax
+
+    fn softmaxed(x: &Tensor) -> Tensor {
+        let mut y = tensor(x.shape(), &data(x));
+        CpuBackend {}.softmax(&mut y).unwrap();
+        y
+    }
+
+    #[test]
+    fn softmax_valid_single_row() {
+        let y = softmaxed(&tensor(&[1, 3], &[1.0, 2.0, 3.0]));
         assert_close(
-            &data(&out),
-            &[
-                0.09003057, 0.24472847, 0.66524096, // row 0
-            ],
+            &data(&y),
+            &[0.09003057, 0.24472847, 0.66524096],
             DEFAULT_TOL,
         );
     }
 
     #[test]
-    fn softmax_valid_using_matrix() {
-        let t = mat(
-            [5, 6],
+    fn softmax_valid_over_rows() {
+        let x = tensor(
+            &[5, 6],
             &[
                 0.5, -1.2, 3.3, 0.0, 2.1, -0.7, // row 0
                 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, // row 1
@@ -730,11 +819,8 @@ mod tests {
                 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, // row 4
             ],
         );
-        let mut out = Tensor::zeros_f32(vec![5, 6]);
-        CpuBackend {}.softmax(&t, &mut out).unwrap();
-        assert_eq!(out.shape(), &[5, 6]);
         assert_close(
-            &data(&out),
+            &data(&softmaxed(&x)),
             &[
                 0.042574773,
                 0.0077777096,
@@ -771,155 +857,119 @@ mod tests {
         );
     }
 
-    /// Every output row is a probability distribution: entries in (0, 1),
-    /// summing to 1.
     #[test]
     fn softmax_rows_sum_to_one() {
-        let t = rope_input_4x8();
-        let mut out = Tensor::zeros_f32(vec![4, 8]);
-        CpuBackend {}.softmax(&t, &mut out).unwrap();
+        let y = softmaxed(&input_4x8());
         for i in 0..4 {
-            let row = row(&out, i);
-            assert!(row.iter().all(|p| *p > 0.0 && *p < 1.0), "row {i}: {row:?}");
-            assert_close(&[row.iter().sum::<f32>()], &[1.0], DEFAULT_TOL);
+            let r = row(&y, i);
+            assert!(r.iter().all(|p| *p > 0.0 && *p < 1.0), "row {i}: {r:?}");
+            assert_close(&[r.iter().sum::<f32>()], &[1.0], DEFAULT_TOL);
         }
     }
 
-    /// Softmax is monotonic: a larger input always gets a larger probability.
-    /// Catches a flipped exponent such as `exp(max - x)`.
     #[test]
     fn softmax_preserves_order_within_a_row() {
-        let t = rope_input_4x8();
-        let mut out = Tensor::zeros_f32(vec![4, 8]);
-        CpuBackend {}.softmax(&t, &mut out).unwrap();
+        let x = input_4x8();
+        let y = softmaxed(&x);
         for i in 0..4 {
-            let (x, y) = (row(&t, i), row(&out, i));
+            let (a, b) = (row(&x, i), row(&y, i));
             for j in 0..8 {
                 for k in 0..8 {
-                    if x[j] < x[k] {
-                        assert!(y[j] < y[k], "row {i}: x[{j}] < x[{k}] but y[{j}] >= y[{k}]");
+                    if a[j] < a[k] {
+                        assert!(b[j] < b[k], "row {i}: x[{j}] < x[{k}] but y[{j}] >= y[{k}]");
                     }
                 }
             }
         }
     }
 
-    /// Adding a constant to a row must not change its softmax. With logits
-    /// near +/-1000, `exp` overflows or underflows f32 (overflow starts around
-    /// 88.7) unless the row max is subtracted first, so this also proves the
-    /// implementation is numerically stable.
+    // exp overflows f32 near 88.7 unless the row max is subtracted first.
     #[test]
     fn softmax_is_shift_invariant_and_stable_for_large_logits() {
-        let t = mat(
-            [3, 3],
+        let x = tensor(
+            &[3, 3],
             &[
-                1.0, 2.0, 3.0, // row 0: reference
-                1000.0, 1001.0, 1002.0, // row 1: naive exp overflows to inf
-                -1000.0, -999.0, -998.0, // row 2: naive exp underflows to 0
+                1.0, 2.0, 3.0, 1000.0, 1001.0, 1002.0, -1000.0, -999.0, -998.0,
             ],
         );
-        let mut out = Tensor::zeros_f32(vec![3, 3]);
-        CpuBackend {}.softmax(&t, &mut out).unwrap();
-
-        let reference = [0.09003057, 0.24472847, 0.66524096];
+        let y = softmaxed(&x);
         for i in 0..3 {
-            assert_close(row(&out, i), &reference, DEFAULT_TOL);
+            assert_close(
+                row(&y, i),
+                &[0.09003057, 0.24472847, 0.66524096],
+                DEFAULT_TOL,
+            );
         }
     }
 
-    /// The shape softmax actually sees in attention: a score matrix with -inf
-    /// above the diagonal. Masked entries must be exactly 0.0, and the rest
-    /// of each row must renormalize among themselves.
     #[test]
     fn softmax_causal_mask() {
         let ninf = f32::NEG_INFINITY;
-        let t = mat(
-            [3, 3],
-            &[
-                0.5, ninf, ninf, // query 0 sees key 0
-                1.0, 2.0, ninf, // query 1 sees keys 0..=1
-                1.0, 2.0, 3.0, // query 2 sees keys 0..=2
-            ],
-        );
-        let mut out = Tensor::zeros_f32(vec![3, 3]);
-        CpuBackend {}.softmax(&t, &mut out).unwrap();
-
-        // Exact, not approximate: a masked position must contribute nothing.
-        for coords in [[0, 1], [0, 2], [1, 2]] {
-            assert_eq!(row(&out, coords[0])[coords[1]], 0.0, "masked {coords:?}");
+        let x = tensor(&[3, 3], &[0.5, ninf, ninf, 1.0, 2.0, ninf, 1.0, 2.0, 3.0]);
+        let y = softmaxed(&x);
+        for (i, j) in [(0, 1), (0, 2), (1, 2)] {
+            assert_eq!(row(&y, i)[j], 0.0, "masked ({i}, {j})");
         }
         assert_close(
-            &data(&out),
+            &data(&y),
             &[
-                1.0, 0.0, 0.0, // row 0
-                0.26894142, 0.7310586, 0.0, // row 1
-                0.09003057, 0.24472847, 0.66524096, // row 2
+                1.0, 0.0, 0.0, 0.26894142, 0.7310586, 0.0, 0.09003057, 0.24472847, 0.66524096,
             ],
             DEFAULT_TOL,
         );
     }
 
-    /// With one column there is only one choice, so it gets all the mass.
     #[test]
     fn softmax_single_column_is_one() {
-        let t = mat([3, 1], &[-5.0, 0.0, 42.0]);
-        let mut out = Tensor::zeros_f32(vec![3, 1]);
-        CpuBackend {}.softmax(&t, &mut out).unwrap();
-        assert_close(&data(&out), &[1.0, 1.0, 1.0], DEFAULT_TOL);
+        let y = softmaxed(&tensor(&[3, 1], &[-5.0, 0.0, 42.0]));
+        assert_close(&data(&y), &[1.0, 1.0, 1.0], DEFAULT_TOL);
     }
 
-    /// A NaN input must not be silently dropped. `f32::max` ignores NaN, so
-    /// the row max is still finite here; the NaN has to show up through the
-    /// sum. PyTorch returns an all-NaN row in this case.
     #[test]
     fn softmax_propagates_nan() {
-        let t = mat([2, 3], &[1.0, f32::NAN, 2.0, 1.0, 2.0, 3.0]);
-        let mut out = Tensor::zeros_f32(vec![2, 3]);
-        CpuBackend {}.softmax(&t, &mut out).unwrap();
+        let y = softmaxed(&tensor(&[2, 3], &[1.0, f32::NAN, 2.0, 1.0, 2.0, 3.0]));
         assert!(
-            row(&out, 0).iter().all(|p| p.is_nan()),
+            row(&y, 0).iter().all(|p| p.is_nan()),
             "row 0: {:?}",
-            row(&out, 0)
+            row(&y, 0)
         );
-        // The NaN must not leak into the next row.
         assert_close(
-            row(&out, 1),
+            row(&y, 1),
             &[0.09003057, 0.24472847, 0.66524096],
             DEFAULT_TOL,
         );
     }
 
     #[test]
-    fn softmax_overwrites_every_element_of_out() {
-        let t = rope_input_4x8();
-        let mut expected = Tensor::zeros_f32(vec![4, 8]);
-        CpuBackend {}.softmax(&t, &mut expected).unwrap();
-
-        let mut out = mat([4, 8], &[999.0; 32]);
-        CpuBackend {}.softmax(&t, &mut out).unwrap();
-        assert_close(&data(&out), &data(&expected), DEFAULT_TOL);
+    fn softmax_rejects_wrong_rank() {
+        let e = err(CpuBackend {}.softmax(&mut tensor(&[3], &[1.0, 2.0, 3.0])));
+        assert!(
+            matches!(
+                e.downcast_ref(),
+                Some(OpsError::RankMismatch { actual: 1, .. })
+            ),
+            "{e}"
+        );
     }
 
     #[test]
-    fn softmax_rejects_out_shape_mismatch() {
-        let t = mat([2, 3], &[1.0; 6]);
-        let mut out = Tensor::zeros_f32(vec![3, 2]); // same element count, wrong shape
-        assert_shape_mismatch(CpuBackend {}.softmax(&t, &mut out));
+    fn softmax_refuses_a_mapped_tensor() {
+        let e = err(CpuBackend {}.softmax(&mut mapped(&[1, 3], &[1.0, 2.0, 3.0])));
+        assert!(e.to_string().contains("read-only"), "{e}");
+    }
+
+    // silu
+
+    fn silued(x: &Tensor) -> Tensor {
+        let mut y = tensor(x.shape(), &data(x));
+        CpuBackend {}.silu(&mut y).unwrap();
+        y
     }
 
     #[test]
-    fn silu_valid_using_vector() {
-        let t = vector(&[0.0, 1.0, -1.0]);
-        let mut out = Tensor::zeros_f32(vec![3]);
-        CpuBackend {}.silu(&t, &mut out).unwrap();
-        assert_eq!(out.shape(), &[3]);
-        assert_close(&data(&out), &[0.0, 0.7310586, -0.26894143], DEFAULT_TOL);
-    }
-
-    #[test]
-    fn silu_valid_using_matrix() {
-        let t = mat(
-            [4, 6],
+    fn silu_valid() {
+        let x = tensor(
+            &[4, 6],
             &[
                 -1.2785, -1.0, -0.5, 0.0, 0.5, 1.0, // row 0
                 2.0, 3.0, -2.0, -3.0, 4.0, -4.0, // row 1
@@ -927,11 +977,8 @@ mod tests {
                 5.5, -5.5, 0.75, -0.75, 1.5, -1.5, // row 3
             ],
         );
-        let mut out = Tensor::zeros_f32(vec![4, 6]);
-        CpuBackend {}.silu(&t, &mut out).unwrap();
-        assert_eq!(out.shape(), &[4, 6]);
         assert_close(
-            &data(&out),
+            &data(&silued(&x)),
             &[
                 -0.27846456,
                 -0.26894143,
@@ -962,117 +1009,83 @@ mod tests {
         );
     }
 
-    /// Large magnitudes must not produce inf or NaN. `exp(-x)` overflows f32
-    /// for x below about -88.7, and `x / inf` gives the correct limit of 0.
     #[test]
-    fn silu_handles_large_magnitudes() {
-        let t = mat([1, 6], &[100.0, -100.0, 88.0, -88.0, 20.0, -20.0]);
-        let mut out = Tensor::zeros_f32(vec![1, 6]);
-        CpuBackend {}.silu(&t, &mut out).unwrap();
-
-        assert!(
-            out.as_f32().unwrap().iter().all(|y| y.is_finite()),
-            "{:?}",
-            data(&out)
-        );
-        // Large positive passes through; large negative decays to zero.
-        assert_close(
-            &data(&out),
-            &[100.0, 0.0, 88.0, 0.0, 20.0, 0.0],
-            DEFAULT_TOL,
-        );
+    fn silu_accepts_a_vector() {
+        let y = silued(&tensor(&[3], &[0.0, 1.0, -1.0]));
+        assert_close(&data(&y), &[0.0, 0.7310586, -0.26894143], DEFAULT_TOL);
     }
 
-    /// SiLU is not monotonic: it dips to about -0.2785 near x = -1.2785, then
-    /// climbs back toward 0. Points further out in either direction must sit
-    /// above the dip.
+    // exp(-x) overflows for x below about -88.7; x / inf is the correct limit, 0.
+    #[test]
+    fn silu_handles_large_magnitudes() {
+        let y = silued(&tensor(&[1, 6], &[100.0, -100.0, 88.0, -88.0, 20.0, -20.0]));
+        assert!(
+            y.as_f32().unwrap().iter().all(|v| v.is_finite()),
+            "{:?}",
+            data(&y)
+        );
+        assert_close(&data(&y), &[100.0, 0.0, 88.0, 0.0, 20.0, 0.0], DEFAULT_TOL);
+    }
+
     #[test]
     fn silu_has_a_minimum_near_negative_1_2785() {
-        let t = mat([1, 5], &[-6.0, -3.0, -1.2785, -0.5, -0.1]);
-        let mut out = Tensor::zeros_f32(vec![1, 5]);
-        CpuBackend {}.silu(&t, &mut out).unwrap();
-
-        let out = data(&out);
-        let dip = out[2];
+        let y = data(&silued(&tensor(
+            &[1, 5],
+            &[-6.0, -3.0, -1.2785, -0.5, -0.1],
+        )));
+        let dip = y[2];
         assert_close(&[dip], &[-0.27846456], DEFAULT_TOL);
-        for (i, y) in out.iter().enumerate() {
+        for (i, v) in y.iter().enumerate() {
             if i != 2 {
-                assert!(*y > dip, "index {i} = {y} should exceed the dip {dip}");
+                assert!(*v > dip, "index {i} = {v} should exceed the dip {dip}");
             }
         }
     }
 
-    /// Elementwise means output `i` depends only on input `i`, so reversing the
-    /// input must reverse the output. Catches an indexing mistake that a
-    /// symmetric input would hide.
     #[test]
     fn silu_is_elementwise() {
-        let forward_in = mat([2, 3], &[-2.0, -0.5, 0.0, 0.75, 1.5, 3.0]);
-        let mut forward_out = Tensor::zeros_f32(vec![2, 3]);
-        CpuBackend {}.silu(&forward_in, &mut forward_out).unwrap();
-
-        let mut reversed: Vec<f32> = data(&forward_in);
-        reversed.reverse();
-        let reversed_in = mat([2, 3], &reversed);
-        let mut reversed_out = Tensor::zeros_f32(vec![2, 3]);
-        CpuBackend {}.silu(&reversed_in, &mut reversed_out).unwrap();
-
-        let mut expected = data(&forward_out);
+        let forward = data(&silued(&tensor(
+            &[2, 3],
+            &[-2.0, -0.5, 0.0, 0.75, 1.5, 3.0],
+        )));
+        let reversed = data(&silued(&tensor(
+            &[2, 3],
+            &[3.0, 1.5, 0.75, 0.0, -0.5, -2.0],
+        )));
+        let mut expected = forward.clone();
         expected.reverse();
-        assert_close(&data(&reversed_out), &expected, DEFAULT_TOL);
+        assert_close(&reversed, &expected, DEFAULT_TOL);
     }
 
     #[test]
-    fn silu_overwrites_every_element_of_out() {
-        let t = mat([2, 3], &[-2.0, -0.5, 0.0, 0.75, 1.5, 3.0]);
-        let mut expected = Tensor::zeros_f32(vec![2, 3]);
-        CpuBackend {}.silu(&t, &mut expected).unwrap();
-
-        let mut out = mat([2, 3], &[999.0; 6]);
-        CpuBackend {}.silu(&t, &mut out).unwrap();
-        assert_close(&data(&out), &data(&expected), DEFAULT_TOL);
+    fn silu_refuses_a_mapped_tensor() {
+        let e = err(CpuBackend {}.silu(&mut mapped(&[3], &[0.0, 1.0, -1.0])));
+        assert!(e.to_string().contains("read-only"), "{e}");
     }
 
-    #[test]
-    fn silu_rejects_out_shape_mismatch() {
-        let t = mat([2, 3], &[1.0; 6]);
-        let mut out = Tensor::zeros_f32(vec![3, 2]); // same element count, wrong shape
-        assert_shape_mismatch(CpuBackend {}.silu(&t, &mut out));
-    }
+    // add: y += x
 
     #[test]
-    fn add_valid_using_vector() {
-        let a = vector(&[1.0, -2.0, 0.5]);
-        let b = vector(&[0.25, 2.0, -1.5]);
-        let mut out = Tensor::zeros_f32(vec![3]);
-        CpuBackend {}.add(&a, &b, &mut out).unwrap();
-        assert_eq!(out.shape(), &[3]);
-        assert_close(&data(&out), &[1.25, 0.0, -1.0], DEFAULT_TOL);
-    }
-
-    #[test]
-    fn add_valid_using_matrix() {
-        let a = mat(
-            [3, 4],
+    fn add_valid() {
+        let mut y = tensor(
+            &[3, 4],
             &[
                 0.0, 1.0, -1.0, 0.5, // row 0
                 2.5, -0.75, 4.0, -8.0, // row 1
                 100.0, -0.125, 3.25, 6.0, // row 2
             ],
         );
-        let b = mat(
-            [3, 4],
+        let x = tensor(
+            &[3, 4],
             &[
                 0.0, -1.0, -2.0, 0.25, // row 0
                 -2.5, 0.75, 0.5, 8.0, // row 1
                 0.5, 0.125, -3.25, -12.0, // row 2
             ],
         );
-        let mut out = Tensor::zeros_f32(vec![3, 4]);
-        CpuBackend {}.add(&a, &b, &mut out).unwrap();
-        assert_eq!(out.shape(), &[3, 4]);
+        CpuBackend {}.add(&mut y, &x).unwrap();
         assert_close(
-            &data(&out),
+            &data(&y),
             &[
                 0.0, 0.0, -3.0, 0.75, // row 0
                 0.0, 0.0, 4.5, 0.0, // row 1
@@ -1083,88 +1096,68 @@ mod tests {
     }
 
     #[test]
+    fn add_accepts_vectors() {
+        let mut y = tensor(&[3], &[1.0, -2.0, 0.5]);
+        CpuBackend {}
+            .add(&mut y, &tensor(&[3], &[0.25, 2.0, -1.5]))
+            .unwrap();
+        assert_close(&data(&y), &[1.25, 0.0, -1.0], DEFAULT_TOL);
+    }
+
+    #[test]
     fn add_is_commutative() {
-        let a = mat([2, 3], &[1.0, -2.0, 0.5, 3.25, -0.125, 0.0]);
-        let b = mat([2, 3], &[0.25, 2.0, -1.5, -3.25, 8.0, 4.0]);
-        let mut ab = Tensor::zeros_f32(vec![2, 3]);
-        let mut ba = Tensor::zeros_f32(vec![2, 3]);
-        CpuBackend {}.add(&a, &b, &mut ab).unwrap();
-        CpuBackend {}.add(&b, &a, &mut ba).unwrap();
+        let a = [1.0, -2.0, 0.5, 3.25, -0.125, 0.0];
+        let b = [0.25, 2.0, -1.5, -3.25, 8.0, 4.0];
+        let mut ab = tensor(&[2, 3], &a);
+        let mut ba = tensor(&[2, 3], &b);
+        CpuBackend {}.add(&mut ab, &tensor(&[2, 3], &b)).unwrap();
+        CpuBackend {}.add(&mut ba, &tensor(&[2, 3], &a)).unwrap();
         assert_close(&data(&ab), &data(&ba), DEFAULT_TOL);
     }
 
-    /// Adding zeros must leave the input untouched.
     #[test]
     fn add_zero_is_identity() {
-        let a = mat([2, 3], &[1.0, -2.0, 0.5, 3.25, -0.125, 0.0]);
-        let zeros = Tensor::zeros_f32(vec![2, 3]);
-        let mut out = Tensor::zeros_f32(vec![2, 3]);
-        CpuBackend {}.add(&a, &zeros, &mut out).unwrap();
-        assert_close(&data(&out), &data(&a), DEFAULT_TOL);
+        let a = [1.0, -2.0, 0.5, 3.25, -0.125, 0.0];
+        let mut y = tensor(&[2, 3], &a);
+        CpuBackend {}
+            .add(&mut y, &Tensor::zeros_f32(vec![2, 3]))
+            .unwrap();
+        assert_close(&data(&y), &a, DEFAULT_TOL);
     }
 
     #[test]
-    fn add_overwrites_every_element_of_out() {
-        let a = mat([2, 3], &[1.0, -2.0, 0.5, 3.25, -0.125, 0.0]);
-        let b = mat([2, 3], &[0.25, 2.0, -1.5, -3.25, 8.0, 4.0]);
-        let mut out = mat([2, 3], &[999.0; 6]);
-        CpuBackend {}.add(&a, &b, &mut out).unwrap();
-        assert_close(
-            &data(&out),
-            &[1.25, 0.0, -1.0, 0.0, 7.875, 4.0],
-            DEFAULT_TOL,
+    fn add_rejects_mismatched_shapes() {
+        let e =
+            err(CpuBackend {}.add(&mut tensor(&[2, 3], &[1.0; 6]), &tensor(&[3, 2], &[1.0; 6])));
+        assert!(
+            matches!(e.downcast_ref(), Some(OpsError::ShapeMismatch { .. })),
+            "{e}"
         );
     }
 
-    #[test]
-    fn add_rejects_mismatched_input_shapes() {
-        let a = mat([2, 3], &[1.0; 6]);
-        let b = mat([3, 2], &[1.0; 6]); // same element count, wrong shape
-        let mut out = Tensor::zeros_f32(vec![2, 3]);
-        assert_shape_mismatch(CpuBackend {}.add(&a, &b, &mut out));
-    }
+    // hadamard_product: y *= x
 
     #[test]
-    fn add_rejects_out_shape_mismatch() {
-        let a = mat([2, 3], &[1.0; 6]);
-        let b = mat([2, 3], &[1.0; 6]);
-        let mut out = Tensor::zeros_f32(vec![6, 1]);
-        assert_shape_mismatch(CpuBackend {}.add(&a, &b, &mut out));
-    }
-
-    #[test]
-    fn hadamard_product_valid_using_vector() {
-        let a = vector(&[2.0, -3.0, 0.5]);
-        let b = vector(&[0.25, 0.5, -4.0]);
-        let mut out = Tensor::zeros_f32(vec![3]);
-        CpuBackend {}.hadamard_product(&a, &b, &mut out).unwrap();
-        assert_eq!(out.shape(), &[3]);
-        assert_close(&data(&out), &[0.5, -1.5, -2.0], DEFAULT_TOL);
-    }
-
-    #[test]
-    fn hadamard_product_valid_using_matrix() {
-        let a = mat(
-            [3, 4],
+    fn hadamard_product_valid() {
+        let mut y = tensor(
+            &[3, 4],
             &[
                 0.0, 1.0, -1.0, 0.5, // row 0
                 2.5, -0.75, 4.0, -8.0, // row 1
                 1.5, -0.125, 3.25, 6.0, // row 2
             ],
         );
-        let b = mat(
-            [3, 4],
+        let x = tensor(
+            &[3, 4],
             &[
                 3.0, -1.0, -2.0, 0.25, // row 0
                 -2.0, 4.0, 0.5, 0.125, // row 1
                 0.5, 8.0, -4.0, -0.5, // row 2
             ],
         );
-        let mut out = Tensor::zeros_f32(vec![3, 4]);
-        CpuBackend {}.hadamard_product(&a, &b, &mut out).unwrap();
-        assert_eq!(out.shape(), &[3, 4]);
+        CpuBackend {}.hadamard_product(&mut y, &x).unwrap();
         assert_close(
-            &data(&out),
+            &data(&y),
             &[
                 0.0, -1.0, 2.0, 0.125, // row 0
                 -5.0, -3.0, 2.0, -1.0, // row 1
@@ -1175,54 +1168,58 @@ mod tests {
     }
 
     #[test]
+    fn hadamard_product_accepts_vectors() {
+        let mut y = tensor(&[3], &[2.0, -3.0, 0.5]);
+        CpuBackend {}
+            .hadamard_product(&mut y, &tensor(&[3], &[0.25, 0.5, -4.0]))
+            .unwrap();
+        assert_close(&data(&y), &[0.5, -1.5, -2.0], DEFAULT_TOL);
+    }
+
+    #[test]
     fn hadamard_product_is_commutative() {
-        let a = mat([2, 3], &[2.0, -3.0, 0.5, 1.25, -0.5, 0.0]);
-        let b = mat([2, 3], &[0.25, 0.5, -4.0, 8.0, -2.0, 3.0]);
-        let mut ab = Tensor::zeros_f32(vec![2, 3]);
-        let mut ba = Tensor::zeros_f32(vec![2, 3]);
-        CpuBackend {}.hadamard_product(&a, &b, &mut ab).unwrap();
-        CpuBackend {}.hadamard_product(&b, &a, &mut ba).unwrap();
+        let a = [2.0, -3.0, 0.5, 1.25, -0.5, 0.0];
+        let b = [0.25, 0.5, -4.0, 8.0, -2.0, 3.0];
+        let mut ab = tensor(&[2, 3], &a);
+        let mut ba = tensor(&[2, 3], &b);
+        CpuBackend {}
+            .hadamard_product(&mut ab, &tensor(&[2, 3], &b))
+            .unwrap();
+        CpuBackend {}
+            .hadamard_product(&mut ba, &tensor(&[2, 3], &a))
+            .unwrap();
         assert_close(&data(&ab), &data(&ba), DEFAULT_TOL);
     }
 
-    /// Multiplying by ones leaves the input untouched; multiplying by zeros
-    /// erases it. Together these pin that it is elementwise and not a matrix
-    /// product, which would not satisfy either for non-square shapes.
     #[test]
     fn hadamard_product_ones_and_zeros() {
-        let a = mat([2, 3], &[2.0, -3.0, 0.5, 1.25, -0.5, 0.0]);
-        let mut out = Tensor::zeros_f32(vec![2, 3]);
-
+        let a = [2.0, -3.0, 0.5, 1.25, -0.5, 0.0];
+        let mut y = tensor(&[2, 3], &a);
         CpuBackend {}
-            .hadamard_product(&a, &mat([2, 3], &[1.0; 6]), &mut out)
+            .hadamard_product(&mut y, &tensor(&[2, 3], &[1.0; 6]))
             .unwrap();
-        assert_close(&data(&out), &data(&a), DEFAULT_TOL);
-
+        assert_close(&data(&y), &a, DEFAULT_TOL);
         CpuBackend {}
-            .hadamard_product(&a, &Tensor::zeros_f32(vec![2, 3]), &mut out)
+            .hadamard_product(&mut y, &Tensor::zeros_f32(vec![2, 3]))
             .unwrap();
-        assert_close(&data(&out), &[0.0; 6], DEFAULT_TOL);
+        assert_close(&data(&y), &[0.0; 6], DEFAULT_TOL);
     }
 
-    /// Output `i` must depend only on input `i`, so reversing both inputs must
-    /// reverse the output. Catches an index mistake that symmetric data hides.
     #[test]
     fn hadamard_product_is_elementwise() {
-        let a = mat([2, 3], &[2.0, -3.0, 0.5, 1.25, -0.5, 4.0]);
-        let b = mat([2, 3], &[0.25, 0.5, -4.0, 8.0, -2.0, 3.0]);
-        let mut forward = Tensor::zeros_f32(vec![2, 3]);
+        let a = [2.0, -3.0, 0.5, 1.25, -0.5, 4.0];
+        let b = [0.25, 0.5, -4.0, 8.0, -2.0, 3.0];
+        let mut forward = tensor(&[2, 3], &a);
         CpuBackend {}
-            .hadamard_product(&a, &b, &mut forward)
+            .hadamard_product(&mut forward, &tensor(&[2, 3], &b))
             .unwrap();
 
-        let rev = |t: &Tensor| {
-            let mut d = data(t);
-            d.reverse();
-            mat([2, 3], &d)
-        };
-        let mut reversed = Tensor::zeros_f32(vec![2, 3]);
+        let (mut ra, mut rb) = (a, b);
+        ra.reverse();
+        rb.reverse();
+        let mut reversed = tensor(&[2, 3], &ra);
         CpuBackend {}
-            .hadamard_product(&rev(&a), &rev(&b), &mut reversed)
+            .hadamard_product(&mut reversed, &tensor(&[2, 3], &rb))
             .unwrap();
 
         let mut expected = data(&forward);
@@ -1231,34 +1228,41 @@ mod tests {
     }
 
     #[test]
-    fn hadamard_product_overwrites_every_element_of_out() {
-        let a = mat([2, 3], &[2.0, -3.0, 0.5, 1.25, -0.5, 0.0]);
-        let b = mat([2, 3], &[0.25, 0.5, -4.0, 8.0, -2.0, 3.0]);
-        let mut out = mat([2, 3], &[999.0; 6]);
-        CpuBackend {}.hadamard_product(&a, &b, &mut out).unwrap();
-        assert_close(&data(&out), &[0.5, -1.5, -2.0, 10.0, 1.0, 0.0], DEFAULT_TOL);
+    fn hadamard_product_rejects_mismatched_shapes() {
+        let e = err(CpuBackend {}
+            .hadamard_product(&mut tensor(&[2, 3], &[1.0; 6]), &tensor(&[3, 2], &[1.0; 6])));
+        assert!(
+            matches!(e.downcast_ref(), Some(OpsError::ShapeMismatch { .. })),
+            "{e}"
+        );
     }
 
     #[test]
-    fn hadamard_product_rejects_mismatched_input_shapes() {
-        let a = mat([2, 3], &[1.0; 6]);
-        let b = mat([3, 2], &[1.0; 6]);
-        let mut out = Tensor::zeros_f32(vec![2, 3]);
-        assert_shape_mismatch(CpuBackend {}.hadamard_product(&a, &b, &mut out));
+    fn elementwise_ops_accept_rank_3() {
+        let a = [1.0, -2.0, 0.5, 4.0];
+        let b = tensor(&[2, 1, 2], &[0.5, 2.0, -0.5, 1.0]);
+
+        let mut y = tensor(&[2, 1, 2], &a);
+        CpuBackend {}.add(&mut y, &b).unwrap();
+        assert_close(&data(&y), &[1.5, 0.0, 0.0, 5.0], DEFAULT_TOL);
+
+        let mut y = tensor(&[2, 1, 2], &a);
+        CpuBackend {}.hadamard_product(&mut y, &b).unwrap();
+        assert_close(&data(&y), &[0.5, -4.0, -0.25, 4.0], DEFAULT_TOL);
+
+        let e = err(CpuBackend {}.add(&mut tensor(&[2, 1, 2], &a), &tensor(&[4], &[0.0; 4])));
+        assert!(
+            matches!(e.downcast_ref(), Some(OpsError::ShapeMismatch { .. })),
+            "{e}"
+        );
     }
 
-    #[test]
-    fn hadamard_product_rejects_out_shape_mismatch() {
-        let a = mat([2, 3], &[1.0; 6]);
-        let b = mat([2, 3], &[1.0; 6]);
-        let mut out = Tensor::zeros_f32(vec![6, 1]);
-        assert_shape_mismatch(CpuBackend {}.hadamard_product(&a, &b, &mut out));
-    }
+    // embedding_lookup
 
-    /// embed[i] = [i*10, i*10+1, i*10+2], so each row is recognizable.
+    // embed[i] = [i*10, i*10+1, i*10+2], so each row is recognizable.
     fn embed_5x3() -> Tensor {
-        mat(
-            [5, 3],
+        tensor(
+            &[5, 3],
             &[
                 0.0, 1.0, 2.0, // id 0
                 10.0, 11.0, 12.0, // id 1
@@ -1269,15 +1273,11 @@ mod tests {
         )
     }
 
-    /// Out-of-order ids with a repeat. Sequential ids would hide a bug that
-    /// ignores `ids` and uses the output position instead.
     #[test]
     fn embedding_lookup_gathers_rows() {
-        let embed = embed_5x3();
-        let ids = [3u32, 0, 3, 4];
         let mut out = Tensor::zeros_f32(vec![4, 3]);
         CpuBackend {}
-            .embedding_lookup(&ids, &embed, &mut out)
+            .embedding_lookup(&[3, 0, 3, 4], &embed_5x3(), &mut out)
             .unwrap();
         assert_close(
             &data(&out),
@@ -1291,17 +1291,13 @@ mod tests {
         );
     }
 
-    /// Token ids range over the vocabulary, not the hidden size. The toy has
-    /// vocab 1024 and hidden 64, and its real prompt starts with ids
-    /// [392, 425, 672, ...] — all far larger than hidden.
     #[test]
     fn embedding_lookup_accepts_ids_larger_than_hidden_size() {
-        let table: Vec<f32> = (0..400).map(|i| i as f32).collect();
-        let embed = mat([100, 4], &table); // vocab 100, hidden 4
-        let ids = [99u32, 64, 0];
+        let values: Vec<f32> = (0..400).map(|i| i as f32).collect();
+        let embed = tensor(&[100, 4], &values);
         let mut out = Tensor::zeros_f32(vec![3, 4]);
         CpuBackend {}
-            .embedding_lookup(&ids, &embed, &mut out)
+            .embedding_lookup(&[99, 64, 0], &embed, &mut out)
             .unwrap();
         assert_close(
             &data(&out),
@@ -1314,301 +1310,172 @@ mod tests {
         );
     }
 
-    /// The decode shape: one token at a time.
     #[test]
     fn embedding_lookup_single_id() {
-        let embed = embed_5x3();
         let mut out = Tensor::zeros_f32(vec![1, 3]);
         CpuBackend {}
-            .embedding_lookup(&[2u32], &embed, &mut out)
+            .embedding_lookup(&[2], &embed_5x3(), &mut out)
             .unwrap();
         assert_close(&data(&out), &[20.0, 21.0, 22.0], DEFAULT_TOL);
     }
 
-    /// A repeated token copies the same row again; no deduplication.
-    #[test]
-    fn embedding_lookup_repeats_rows() {
-        let embed = embed_5x3();
-        let mut out = Tensor::zeros_f32(vec![3, 3]);
-        CpuBackend {}
-            .embedding_lookup(&[2u32, 2, 2], &embed, &mut out)
-            .unwrap();
-        assert_close(
-            &data(&out),
-            &[20.0, 21.0, 22.0, 20.0, 21.0, 22.0, 20.0, 21.0, 22.0],
-            DEFAULT_TOL,
-        );
-    }
-
     #[test]
     fn embedding_lookup_empty_ids() {
-        let embed = embed_5x3();
         let mut out = Tensor::zeros_f32(vec![0, 3]);
         CpuBackend {}
-            .embedding_lookup(&[], &embed, &mut out)
+            .embedding_lookup(&[], &embed_5x3(), &mut out)
             .unwrap();
-        assert_eq!(out.as_f32().unwrap().iter().count(), 0);
+        assert!(out.as_f32().unwrap().is_empty());
     }
 
     #[test]
     fn embedding_lookup_overwrites_every_element_of_out() {
-        let embed = embed_5x3();
-        let mut out = mat([2, 3], &[999.0; 6]);
+        let mut out = tensor(&[2, 3], &[999.0; 6]);
         CpuBackend {}
-            .embedding_lookup(&[1u32, 0], &embed, &mut out)
+            .embedding_lookup(&[1, 0], &embed_5x3(), &mut out)
             .unwrap();
         assert_close(&data(&out), &[10.0, 11.0, 12.0, 0.0, 1.0, 2.0], DEFAULT_TOL);
     }
 
-    /// An id at or past `vocab_size` means a tokenizer/vocab mismatch and must
-    /// be rejected.
     #[test]
     fn embedding_lookup_rejects_id_past_vocab() {
-        let table: Vec<f32> = (0..40).map(|i| i as f32).collect();
-        let embed = mat([5, 8], &table); // vocab 5, hidden 8
-        let mut out = Tensor::zeros_f32(vec![1, 8]);
-        let result = CpuBackend {}.embedding_lookup(&[5u32], &embed, &mut out); // ids are 0..=4
-        assert!(result.is_err(), "got {result:?}");
+        let mut out = Tensor::zeros_f32(vec![1, 3]);
+        assert!(
+            CpuBackend {}
+                .embedding_lookup(&[5], &embed_5x3(), &mut out)
+                .is_err()
+        );
     }
 
     #[test]
     fn embedding_lookup_rejects_out_shape_mismatch() {
-        let embed = embed_5x3();
-        let mut out = Tensor::zeros_f32(vec![3, 2]); // should be [2, 3]
-        assert_shape_mismatch(CpuBackend {}.embedding_lookup(&[1u32, 0], &embed, &mut out));
+        let mut out = Tensor::zeros_f32(vec![3, 2]);
+        let e = err(CpuBackend {}.embedding_lookup(&[1, 0], &embed_5x3(), &mut out));
+        assert!(
+            matches!(e.downcast_ref(), Some(OpsError::ShapeMismatch { .. })),
+            "{e}"
+        );
     }
 
-    // Mapped storage. Ops read through typed views, so where a tensor's bytes
-    // live must not change any result. Weights arrive mapped; activations and
-    // outputs stay on the heap. Each test reuses the expectations of its heap
-    // twin above.
-
-    /// A read-only matrix backed by a mapped temp file, as a weight would be.
-    fn mapped_mat(shape: [usize; 2], data: &[f32]) -> Tensor {
-        Tensor::new(shape.to_vec(), Dtype::F32, Storage::Mmap(mmap_f32(data))).unwrap()
-    }
-
-    fn mapped_vector(data: &[f32]) -> Tensor {
-        Tensor::new(vec![data.len()], Dtype::F32, Storage::Mmap(mmap_f32(data))).unwrap()
-    }
-
-    #[track_caller]
-    fn assert_read_only(result: Result<()>) {
-        let msg = result.unwrap_err().to_string().to_lowercase();
-        assert!(msg.contains("read-only"), "{msg}");
-    }
-
-    /// The first real use in phase 2: token ids gathered out of the mapped
-    /// embedding table.
     #[test]
-    fn embedding_lookup_reads_a_mapped_table() {
-        let embed = mapped_mat([5, 3], &data(&embed_5x3()));
-        let ids = [3u32, 0, 3, 4];
+    fn embedding_lookup_rejects_wrong_rank() {
+        let e = err(CpuBackend {}.embedding_lookup(
+            &[0],
+            &tensor(&[15], &[0.0; 15]),
+            &mut Tensor::zeros_f32(vec![1, 3]),
+        ));
+        assert!(
+            matches!(
+                e.downcast_ref(),
+                Some(OpsError::RankMismatch { actual: 1, .. })
+            ),
+            "{e}"
+        );
+        let e = err(CpuBackend {}.embedding_lookup(
+            &[0],
+            &embed_5x3(),
+            &mut Tensor::zeros_f32(vec![3]),
+        ));
+        assert!(
+            matches!(
+                e.downcast_ref(),
+                Some(OpsError::RankMismatch { actual: 1, .. })
+            ),
+            "{e}"
+        );
+    }
+
+    // Mapped storage: weights arrive mapped, so reads must work and writes
+    // must fail cleanly.
+
+    #[test]
+    fn ops_read_mapped_inputs() {
         let mut out = Tensor::zeros_f32(vec![4, 3]);
+        let embed = mapped(&[5, 3], &data(&embed_5x3()));
         CpuBackend {}
-            .embedding_lookup(&ids, &embed, &mut out)
+            .embedding_lookup(&[3, 0, 3, 4], &embed, &mut out)
             .unwrap();
-        assert_close(
-            &data(&out),
-            &[
-                30.0, 31.0, 32.0, // id 3
-                0.0, 1.0, 2.0, // id 0
-                30.0, 31.0, 32.0, // id 3 again
-                40.0, 41.0, 42.0, // id 4
-            ],
-            DEFAULT_TOL,
-        );
-    }
+        assert_eq!(row(&out, 0), &[30.0, 31.0, 32.0]);
 
-    /// The projection shape: a heap activation times a mapped weight.
-    #[test]
-    fn matmul_reads_a_mapped_weight() {
-        let w = mapped_mat([4, 3], &data(&b_4x3()));
         let mut out = Tensor::zeros_f32(vec![2, 4]);
-        CpuBackend {}.matmul(&a_2x3(), &w, &mut out).unwrap();
-        assert_close(
-            &data(&out),
-            &[
-                6.0, -6.5, 6.0, 2.0, // row 0
-                1.0, 8.0, -10.5, 6.5, // row 1
-            ],
-            DEFAULT_TOL,
-        );
-    }
-
-    /// Both operands mapped. Inference never does this, but no result should
-    /// depend on either side living on the heap.
-    #[test]
-    fn matmul_reads_two_mapped_inputs() {
-        let a = mapped_mat([2, 3], &data(&a_2x3()));
-        let b = mapped_mat([4, 3], &data(&b_4x3()));
-        let mut out = Tensor::zeros_f32(vec![2, 4]);
+        let a = mapped(&[2, 3], &data(&a_2x3()));
+        let b = mapped(&[4, 3], &data(&b_4x3()));
         CpuBackend {}.matmul(&a, &b, &mut out).unwrap();
         assert_close(
             &data(&out),
             &[6.0, -6.5, 6.0, 2.0, 1.0, 8.0, -10.5, 6.5],
             DEFAULT_TOL,
         );
-    }
 
-    #[test]
-    fn rmsnorm_reads_a_mapped_weight() {
-        let w = mapped_vector(&[1.0, 2.0, 0.5]);
         let mut out = Tensor::zeros_f32(vec![2, 3]);
-        CpuBackend {}.rmsnorm(&a_2x3(), &w, 1e-6, &mut out).unwrap();
+        CpuBackend {}
+            .rmsnorm(&a_2x3(), &mapped(&[3], &[1.0, 2.0, 0.5]), 1e-6, &mut out)
+            .unwrap();
         assert_close(
             &data(&out),
-            &[
-                1.0392302, -2.7712806, 0.0, // row 0
-                -0.2553769, 3.064523, -0.3830654, // row 1
-            ],
+            &[1.0392302, -2.7712806, 0.0, -0.2553769, 3.064523, -0.3830654],
             DEFAULT_TOL,
         );
-    }
 
-    /// The bias shape: a heap activation plus a mapped f32 weight.
-    #[test]
-    fn add_reads_a_mapped_input() {
-        let a = vector(&[1.0, -2.0, 0.5]);
-        let b = mapped_vector(&[0.25, 2.0, -1.5]);
-        let mut out = Tensor::zeros_f32(vec![3]);
-        CpuBackend {}.add(&a, &b, &mut out).unwrap();
-        assert_close(&data(&out), &[1.25, 0.0, -1.0], DEFAULT_TOL);
-    }
-
-    // A mapped tensor as the output is a caller bug. It must come back as an
-    // error, never a write through a read-only page. One op per access
-    // pattern: whole-tensor view, hoisted slices, and per-row views.
-
-    #[test]
-    fn add_refuses_a_mapped_output() {
-        let a = vector(&[1.0, -2.0, 0.5]);
-        let b = vector(&[0.25, 2.0, -1.5]);
-        let mut out = mapped_vector(&[0.0; 3]);
-        assert_read_only(CpuBackend {}.add(&a, &b, &mut out));
+        let mut y = tensor(&[3], &[1.0, -2.0, 0.5]);
+        CpuBackend {}
+            .add(&mut y, &mapped(&[3], &[0.25, 2.0, -1.5]))
+            .unwrap();
+        assert_close(&data(&y), &[1.25, 0.0, -1.0], DEFAULT_TOL);
     }
 
     #[test]
-    fn matmul_refuses_a_mapped_output() {
-        let mut out = mapped_mat([2, 4], &[0.0; 8]);
-        assert_read_only(CpuBackend {}.matmul(&a_2x3(), &b_4x3(), &mut out));
+    fn ops_refuse_mapped_outputs() {
+        let e = err(CpuBackend {}.add(&mut mapped(&[3], &[0.0; 3]), &tensor(&[3], &[1.0; 3])));
+        assert!(e.to_string().contains("read-only"), "{e}");
+        let e = err(CpuBackend {}.matmul(&a_2x3(), &b_4x3(), &mut mapped(&[2, 4], &[0.0; 8])));
+        assert!(e.to_string().contains("read-only"), "{e}");
+        let e = err(CpuBackend {}.embedding_lookup(
+            &[1, 0],
+            &embed_5x3(),
+            &mut mapped(&[2, 3], &[0.0; 6]),
+        ));
+        assert!(e.to_string().contains("read-only"), "{e}");
     }
 
     #[test]
-    fn embedding_lookup_refuses_a_mapped_output() {
-        let mut out = mapped_mat([2, 3], &[0.0; 6]);
-        assert_read_only(CpuBackend {}.embedding_lookup(&[1u32, 0], &embed_5x3(), &mut out));
+    fn shape_mismatch_carries_both_shapes() {
+        let b = Tensor::zeros_f32(vec![4, 7]);
+        let e = err(CpuBackend {}.matmul(&a_2x3(), &b, &mut Tensor::zeros_f32(vec![2, 4])));
+        match e.downcast::<OpsError>() {
+            Ok(OpsError::ShapeMismatch {
+                expected, actual, ..
+            }) => {
+                assert_eq!(expected, [4, 3]);
+                assert_eq!(actual, [4, 7]);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
-    /// Shape rules are checked before storage, so a call that is wrong both
-    /// ways reports the shape. Pins the order so error messages stay stable.
+    #[test]
+    fn rank_mismatch_names_the_tensor() {
+        let b = Tensor::zeros_f32(vec![4, 3, 1]);
+        let e = err(CpuBackend {}.matmul(&a_2x3(), &b, &mut Tensor::zeros_f32(vec![2, 4])));
+        match e.downcast::<OpsError>() {
+            Ok(OpsError::RankMismatch {
+                name,
+                expected,
+                actual,
+            }) => {
+                assert_eq!(name, "matmul b");
+                assert_eq!((expected, actual), (2, 3));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn shape_mismatch_is_reported_before_read_only() {
-        let mut out = mapped_mat([3, 2], &[0.0; 6]); // wrong shape and read-only
-        assert_shape_mismatch(CpuBackend {}.softmax(&a_2x3(), &mut out));
-    }
-
-    // Rank. It is a runtime property now, so each op must refuse the wrong one
-    // with the tensor crate's error instead of panicking on a shape index.
-
-    #[track_caller]
-    fn assert_bad_rank(result: Result<()>, want: usize, got: usize) {
-        let msg = result.unwrap_err().to_string().to_lowercase();
+        let e = err(CpuBackend {}.matmul(&a_2x3(), &b_4x3(), &mut mapped(&[3, 2], &[0.0; 6])));
         assert!(
-            msg.contains(&format!("rank of {want} but got {got}")),
-            "{msg}"
+            matches!(e.downcast_ref(), Some(OpsError::ShapeMismatch { .. })),
+            "{e}"
         );
-    }
-
-    #[test]
-    fn matmul_rejects_wrong_rank() {
-        let v = vector(&[1.0, 2.0, 3.0]);
-        let cube = Tensor::zeros_f32(vec![2, 2, 3]);
-        let mut out = Tensor::zeros_f32(vec![2, 4]);
-        assert_bad_rank(CpuBackend {}.matmul(&v, &b_4x3(), &mut out), 2, 1);
-        assert_bad_rank(CpuBackend {}.matmul(&a_2x3(), &cube, &mut out), 2, 3);
-        assert_bad_rank(
-            CpuBackend {}.matmul(&a_2x3(), &b_4x3(), &mut vector(&[0.0; 8])),
-            2,
-            1,
-        );
-    }
-
-    #[test]
-    fn rmsnorm_rejects_wrong_rank() {
-        let mut out = Tensor::zeros_f32(vec![2, 3]);
-        let w_matrix = mat([1, 3], &[1.0; 3]);
-        assert_bad_rank(
-            CpuBackend {}.rmsnorm(&a_2x3(), &w_matrix, 1e-6, &mut out),
-            1,
-            2,
-        );
-
-        let v = vector(&[1.0, 2.0, 3.0]);
-        let w = vector(&[1.0; 3]);
-        assert_bad_rank(
-            CpuBackend {}.rmsnorm(&v, &w, 1e-6, &mut vector(&[0.0; 3])),
-            2,
-            1,
-        );
-    }
-
-    #[test]
-    fn rope_rejects_wrong_rank() {
-        let table = RopeTable::new(8, 4, 10000.0);
-        let v = vector(&[0.0; 8]);
-        assert_bad_rank(
-            CpuBackend {}.rope(&v, &table, 0, &mut vector(&[0.0; 8])),
-            2,
-            1,
-        );
-    }
-
-    #[test]
-    fn softmax_rejects_wrong_rank() {
-        let v = vector(&[1.0, 2.0, 3.0]);
-        assert_bad_rank(CpuBackend {}.softmax(&v, &mut vector(&[0.0; 3])), 2, 1);
-    }
-
-    #[test]
-    fn embedding_lookup_rejects_wrong_rank() {
-        let table = vector(&[0.0; 15]);
-        let mut out = Tensor::zeros_f32(vec![1, 3]);
-        assert_bad_rank(
-            CpuBackend {}.embedding_lookup(&[0u32], &table, &mut out),
-            2,
-            1,
-        );
-        assert_bad_rank(
-            CpuBackend {}.embedding_lookup(&[0u32], &embed_5x3(), &mut vector(&[0.0; 3])),
-            2,
-            1,
-        );
-    }
-
-    // Elementwise ops take any rank, as long as all three shapes agree.
-    #[test]
-    fn elementwise_ops_accept_any_rank() {
-        let a = Tensor::new(
-            vec![2, 1, 2],
-            Dtype::F32,
-            Storage::Heap(vec![1.0, -2.0, 0.5, 4.0]),
-        )
-        .unwrap();
-        let b = Tensor::new(
-            vec![2, 1, 2],
-            Dtype::F32,
-            Storage::Heap(vec![0.5, 2.0, -0.5, 1.0]),
-        )
-        .unwrap();
-        let mut out = Tensor::zeros_f32(vec![2, 1, 2]);
-        CpuBackend {}.add(&a, &b, &mut out).unwrap();
-        assert_close(&data(&out), &[1.5, 0.0, 0.0, 5.0], DEFAULT_TOL);
-        CpuBackend {}.hadamard_product(&a, &b, &mut out).unwrap();
-        assert_close(&data(&out), &[0.5, -4.0, -0.25, 4.0], DEFAULT_TOL);
-
-        // Same element count, different rank.
-        let flat = vector(&[0.0; 4]);
-        assert_shape_mismatch(CpuBackend {}.add(&a, &flat, &mut out));
     }
 }

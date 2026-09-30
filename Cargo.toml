@@ -1,8 +1,10 @@
 [workspace]
 resolver = "3"
-members = [ "crates/olm", "crates/ops", "crates/tensor", "crates/testutil", "crates/tokenizer"]
+members = ["crates/model", "crates/olm", "crates/ops", "crates/tensor", "crates/testutil", "crates/tokenizer"]
 
 [workspace.dependencies]
 tensor = { path = "crates/tensor" }
+olm = { path = "crates/olm" }
+ops = { path = "crates/ops" }
 tokenizer = { path = "crates/tokenizer" }
 testutil = { path = "crates/testutil" }

@@ -53,15 +53,7 @@ pub struct Tensor {
 
 impl Tensor {
     pub fn new(shape: Vec<usize>, dtype: Dtype, storage: Storage) -> Result<Self> {
-        let shape_size: usize = shape.iter().product();
-        let shape_size = shape_size * dtype.size_bytes();
-        if shape_size != storage.size_bytes() {
-            return Err(TensorError::SizeMismatch {
-                shape_size,
-                data_size: storage.size_bytes(),
-            }
-            .into());
-        }
+        Self::check_shape(&shape, &storage, dtype)?;
         match storage {
             Storage::Heap(_) => {
                 if dtype != Dtype::F32 {
@@ -90,6 +82,12 @@ impl Tensor {
         &self.shape
     }
 
+    pub fn reshape(&mut self, shape: Vec<usize>) -> Result<()> {
+        Self::check_shape(&shape, &self.storage, self.dtype)?;
+        self.shape = shape;
+        Ok(())
+    }
+
     pub fn as_f32(&self) -> Result<&[f32]> {
         self.check_dtype(Dtype::F32)?;
         match &self.storage {
@@ -106,26 +104,15 @@ impl Tensor {
         }
     }
 
-    pub fn dim1(&self) -> Result<usize> {
-        if self.shape.len() != 1 {
+    pub fn dim(&self, i: usize) -> Result<usize> {
+        if i >= self.shape.len() {
             return Err(TensorError::BadRank {
-                expected: 1,
+                expected: i + 1,
                 actual: self.shape.len(),
             }
             .into());
         }
-        Ok(self.shape[0])
-    }
-
-    pub fn dim2(&self) -> Result<(usize, usize)> {
-        if self.shape.len() != 2 {
-            return Err(TensorError::BadRank {
-                expected: 2,
-                actual: self.shape.len(),
-            }
-            .into());
-        }
-        Ok((self.shape[0], self.shape[1]))
+        Ok(self.shape[i])
     }
 
     fn check_dtype(&self, dtype: Dtype) -> Result<()> {
@@ -133,6 +120,19 @@ impl Tensor {
             return Err(TensorError::DtypeMismatch {
                 expected: dtype,
                 actual: self.dtype,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn check_shape(shape: &Vec<usize>, storage: &Storage, dtype: Dtype) -> Result<()> {
+        let shape_size: usize = shape.iter().product();
+        let shape_size = shape_size * dtype.size_bytes();
+        if shape_size != storage.size_bytes() {
+            return Err(TensorError::SizeMismatch {
+                shape_size,
+                data_size: storage.size_bytes(),
             }
             .into());
         }
@@ -152,8 +152,6 @@ fn cast_f32(bytes: &[u8]) -> Result<&[f32]> {
 enum TensorError {
     #[error("Tensor shape needs {shape_size} elements but got {data_size} elements from data")]
     SizeMismatch { shape_size: usize, data_size: usize },
-    #[error("Out of bounds access to tensor")]
-    OutOfBounds,
     #[error("Tried to fetch dtype {expected} but got {actual}")]
     DtypeMismatch { expected: Dtype, actual: Dtype },
     #[error("{0}")]
@@ -259,37 +257,104 @@ mod tests {
         assert_eq!(t.as_f32().unwrap(), &[0.0, 0.0, 0.0, 7.5]);
     }
 
-    // Rank
+    // Dimensions
 
     #[test]
-    fn dim1_and_dim2_return_the_dimensions() {
-        assert_eq!(Tensor::zeros_f32(vec![5]).dim1().unwrap(), 5);
-        assert_eq!(Tensor::zeros_f32(vec![2, 3]).dim2().unwrap(), (2, 3));
-        assert_eq!(Tensor::zeros_f32(vec![0, 3]).dim2().unwrap(), (0, 3));
+    fn dim_returns_each_dimension() {
+        let t = Tensor::zeros_f32(vec![2, 3, 4]);
+        assert_eq!(t.dim(0).unwrap(), 2);
+        assert_eq!(t.dim(1).unwrap(), 3);
+        assert_eq!(t.dim(2).unwrap(), 4);
+        assert_eq!(Tensor::zeros_f32(vec![0, 3]).dim(0).unwrap(), 0);
     }
 
     #[test]
-    fn dim1_rejects_other_ranks() {
-        for shape in [vec![], vec![2, 3], vec![2, 3, 4]] {
+    fn dim_rejects_an_index_past_the_rank() {
+        for (shape, i) in [(vec![], 0), (vec![5], 1), (vec![2, 3], 2), (vec![2, 3], 7)] {
             let rank = shape.len();
-            let err = tensor_err(Tensor::zeros_f32(shape).dim1());
+            let err = tensor_err(Tensor::zeros_f32(shape).dim(i));
             assert!(
-                matches!(err, TensorError::BadRank { expected: 1, actual } if actual == rank),
-                "{err:?}"
+                matches!(err, TensorError::BadRank { actual, .. } if actual == rank),
+                "dim({i}): {err:?}"
             );
         }
     }
 
+    // dim(2) needs rank 3. "Expected rank of 2 but got 2" reads as no error at all.
     #[test]
-    fn dim2_rejects_other_ranks() {
-        for shape in [vec![], vec![6], vec![2, 3, 4]] {
-            let rank = shape.len();
-            let err = tensor_err(Tensor::zeros_f32(shape).dim2());
-            assert!(
-                matches!(err, TensorError::BadRank { expected: 2, actual } if actual == rank),
-                "{err:?}"
-            );
-        }
+    fn dim_error_names_the_rank_it_needs() {
+        let err = tensor_err(Tensor::zeros_f32(vec![2, 3]).dim(2));
+        assert!(
+            matches!(
+                err,
+                TensorError::BadRank {
+                    expected: 3,
+                    actual: 2
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    // Reshape
+
+    #[test]
+    fn reshape_changes_the_shape_and_keeps_the_data() {
+        let values: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        let mut t = Tensor::new(vec![2, 12], Dtype::F32, heap(&values)).unwrap();
+        t.reshape(vec![2, 3, 4]).unwrap();
+        assert_eq!(t.shape(), &[2, 3, 4]);
+        assert_eq!(t.as_f32().unwrap(), values.as_slice());
+    }
+
+    #[test]
+    fn reshape_round_trips_through_heads() {
+        let mut t = Tensor::zeros_f32(vec![3, 8]);
+        t.reshape(vec![3, 2, 4]).unwrap();
+        t.reshape(vec![3, 8]).unwrap();
+        assert_eq!(t.shape(), &[3, 8]);
+    }
+
+    #[test]
+    fn reshape_to_and_from_rank_zero() {
+        let mut t = Tensor::new(vec![1, 1], Dtype::F32, heap(&[1.5])).unwrap();
+        t.reshape(vec![]).unwrap();
+        assert!(t.shape().is_empty());
+        t.reshape(vec![1]).unwrap();
+        assert_eq!(t.as_f32().unwrap(), &[1.5]);
+    }
+
+    // Both sizes are in bytes.
+    #[test]
+    fn reshape_rejects_a_different_element_count() {
+        let mut t = Tensor::zeros_f32(vec![2, 3]);
+        let err = tensor_err(t.reshape(vec![2, 4]));
+        assert!(
+            matches!(
+                err,
+                TensorError::SizeMismatch {
+                    shape_size: 32,
+                    data_size: 24
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn failed_reshape_keeps_the_old_shape() {
+        let mut t = Tensor::zeros_f32(vec![2, 3]);
+        assert!(t.reshape(vec![7]).is_err());
+        assert_eq!(t.shape(), &[2, 3]);
+    }
+
+    #[test]
+    fn reshape_of_mapped_storage_does_not_copy() {
+        let map = mmap_f32(&[1.0, 2.0, 3.0, 4.0]);
+        let addr = map.as_ptr() as usize;
+        let mut t = Tensor::new(vec![4], Dtype::F32, Storage::Mmap(map)).unwrap();
+        t.reshape(vec![2, 2]).unwrap();
+        assert_eq!(t.as_f32().unwrap().as_ptr() as usize, addr);
     }
 
     // Mapped storage

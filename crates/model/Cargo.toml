@@ -1,0 +1,14 @@
+[package]
+name = "model"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+olm = { workspace = true }
+ops = { workspace = true }
+tensor = { workspace = true }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+testutil = { workspace = true }

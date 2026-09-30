@@ -42,8 +42,10 @@ impl RopeTable {
 }
 
 pub trait Backend {
-    /// Adds two same-shaped tensors together, and provides the results to `out`.
-    fn add(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<()>;
+    /// Adds two same-shaped tensors together.
+    ///
+    /// Results are written back in place to `y`.
+    fn add(&self, y: &mut Tensor, x: &Tensor) -> Result<()>;
 
     /// Performs a 2D matrix multiplication, and provides the results to `out`.
     ///
@@ -53,9 +55,10 @@ pub trait Backend {
     /// match.
     fn matmul(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<()>;
 
-    /// Calculates the Hadamard product of two tensors, and provides the results
-    /// to `out`.
-    fn hadamard_product(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<()>;
+    /// Calculates the Hadamard product of two tensors.
+    ///
+    /// Results are written back in place to `y`.
+    fn hadamard_product(&self, y: &mut Tensor, x: &Tensor) -> Result<()>;
 
     /// Normalizes each row of the input tensor by root-mean-square and provides
     /// the results to `out`.
@@ -67,8 +70,10 @@ pub trait Backend {
     /// `eps` is an additive factor to prevent divide by zero.
     fn rmsnorm(&self, t: &Tensor, w: &Tensor, eps: f32, out: &mut Tensor) -> Result<()>;
 
-    /// Calculates the RoPE (Rotary Position Embeddings) of the input matrix,
-    /// and provides the result to `out`.
+    /// Calculates the RoPE (Rotary Position Embeddings) of the input matrix.
+    ///
+    /// Results are written back in place to `y`. It is assumed `y` is a 3d
+    /// tensor, with [row, heads, elems_per_head].
     ///
     /// This method implements the rotate-half variant of RoPE for optimal
     /// cache locality. Hugging Face and Llama models are trained with this, so
@@ -78,16 +83,19 @@ pub trait Backend {
     ///
     /// `m_start` is the starting index for the token offset. An input tensor of
     /// N row will provide output for token positions [m_start, m_start + N).
-    fn rope(&self, t: &Tensor, table: &RopeTable, m_start: usize, out: &mut Tensor) -> Result<()>;
+    fn rope(&self, y: &mut Tensor, table: &RopeTable, m_start: usize) -> Result<()>;
 
-    /// Calculates the softmax of the input tensor, and provides the result to
-    /// `out`.
+    /// Calculates the softmax of the input tensor.
+    ///
+    /// Results are written back in place to `y`.
     ///
     /// This method applies softmax row-wise.
-    fn softmax(&self, t: &Tensor, out: &mut Tensor) -> Result<()>;
+    fn softmax(&self, y: &mut Tensor) -> Result<()>;
 
-    /// Calculates Sigmoid Linear Unit (SiLU), and provides the results to `out`.
-    fn silu(&self, t: &Tensor, out: &mut Tensor) -> Result<()>;
+    /// Calculates Sigmoid Linear Unit (SiLU).
+    ///
+    /// Results are written back in place to `y`.
+    fn silu(&self, y: &mut Tensor) -> Result<()>;
 
     /// Performs an embedding lookup and provides the results to `out`.
     ///
@@ -98,8 +106,18 @@ pub trait Backend {
 
 #[derive(Debug, Error)]
 enum OpsError {
-    #[error("Tensor shapes do not fit this operation")]
-    ShapeMismatch,
+    #[error("{desc}: expected {expected:?}, got {actual:?}")]
+    ShapeMismatch {
+        desc: String,
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+    #[error("{name} must have rank {expected}, got rank {actual}")]
+    RankMismatch {
+        name: String,
+        expected: usize,
+        actual: usize,
+    },
 }
 
 #[cfg(test)]

@@ -174,7 +174,7 @@ pub struct Hyperparameters {
     pub rope: RopeParameters,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum RopeParameters {
     Default {
